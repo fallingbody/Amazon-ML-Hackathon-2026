@@ -246,6 +246,35 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
             
             model.train(X_train, y_train, X_val, y_val, val_groups=val_groups)
             print(f"Optimal Macro F0.5 Threshold: {model.optimal_threshold:.3f}", flush=True)
+
+            # Compute and display validation Confusion Matrix
+            val_probs = model.predict_proba(X_val)
+            val_preds = (val_probs >= model.optimal_threshold).astype(int)
+            
+            tp = int(np.sum((val_preds == 1) & (y_val == 1)))
+            fp = int(np.sum((val_preds == 1) & (y_val == 0)))
+            fn = int(np.sum((val_preds == 0) & (y_val == 1)))
+            tn = int(np.sum((val_preds == 0) & (y_val == 0)))
+
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f05 = (1.25 * prec * rec) / (0.25 * prec + rec) if (0.25 * prec + rec) > 0 else 0.0
+            f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+
+            print("\n" + "=" * 55, flush=True)
+            print("   VALIDATION SET CONFUSION MATRIX & METRICS   ", flush=True)
+            print("=" * 55, flush=True)
+            print(f"  Total Validation Pairs : {len(y_val):,}", flush=True)
+            print(f"  True Positives  (TP)   : {tp:,}  (Correct matches)", flush=True)
+            print(f"  False Positives (FP)   : {fp:,}  (Incorrect predictions)", flush=True)
+            print(f"  False Negatives (FN)   : {fn:,}  (Missed true matches)", flush=True)
+            print(f"  True Negatives  (TN)   : {tn:,}  (Correct non-matches)", flush=True)
+            print("-" * 55, flush=True)
+            print(f"  Validation Precision   : {prec * 100:.2f}%", flush=True)
+            print(f"  Validation Recall      : {rec * 100:.2f}%", flush=True)
+            print(f"  Validation F1-Score    : {f1:.4f}", flush=True)
+            print(f"  Validation Macro F0.5  : {f05:.4f}", flush=True)
+            print("=" * 55 + "\n", flush=True)
         else:
             model.train(X_df, y_arr)
         
