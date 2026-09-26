@@ -3,6 +3,8 @@ Module: model.py
 LightGBM Classifier model training, evaluation, and Macro F0.5 score threshold optimization.
 Supports GPU acceleration.
 """
+import os
+import pickle
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -135,3 +137,23 @@ class EntityResolutionModel:
                 best_thresh = thresh
 
         return float(best_thresh)
+
+    def save(self, filepath: str):
+        """Saves trained model and threshold to disk."""
+        dirname = os.path.dirname(filepath)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+        with open(filepath, "wb") as f:
+            pickle.dump({"clf": self.clf, "optimal_threshold": self.optimal_threshold}, f)
+        print(f"Model successfully saved to {filepath}", flush=True)
+
+    @classmethod
+    def load(cls, filepath: str):
+        """Loads trained model and threshold from disk."""
+        with open(filepath, "rb") as f:
+            data = pickle.load(f)
+        model = cls()
+        model.clf = data["clf"]
+        model.optimal_threshold = data["optimal_threshold"]
+        print(f"Loaded trained model from {filepath} (optimal_threshold={model.optimal_threshold:.3f})", flush=True)
+        return model

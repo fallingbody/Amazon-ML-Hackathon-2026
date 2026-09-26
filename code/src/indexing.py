@@ -9,30 +9,38 @@ import pandas as pd
 from typing import List, Set, Dict, Any
 from .preprocessing import extract_tokens, clean_text
 
-def resolve_db_path(db_path: str = None) -> str:
-    if db_path and os.path.exists(db_path):
-        return db_path
+def resolve_db_path(db_path: str = None, split: str = "train") -> str:
+    if db_path:
+        dirname = os.path.dirname(db_path)
+        if not dirname or os.path.exists(dirname):
+            return db_path
+        try:
+            os.makedirs(dirname, exist_ok=True)
+            return db_path
+        except Exception:
+            pass
+    db_name = f"index_{split}.db" if split != "train" else "index.db"
     possible_paths = [
-        "6ab10eb3b23ba_student_resource/student_resource/index.db",
-        "student_resource/index.db",
-        "index.db",
-        "../6ab10eb3b23ba_student_resource/student_resource/index.db",
-        "/content/6ab10eb3b23ba_student_resource/student_resource/index.db",
-        "/content/dataset/index.db",
-        "/content/index.db"
+        db_name,
+        os.path.join("dataset", db_name),
+        f"6ab10eb3b23ba_student_resource/student_resource/{db_name}",
+        f"student_resource/{db_name}",
+        f"../6ab10eb3b23ba_student_resource/student_resource/{db_name}",
+        f"/content/6ab10eb3b23ba_student_resource/student_resource/{db_name}",
+        f"/content/{db_name}"
     ]
     for p in possible_paths:
         if os.path.exists(p):
             return p
-    return possible_paths[0]
+    return db_name
 
 def resolve_dataset_base(dataset_base: str = None) -> str:
     if dataset_base and os.path.exists(dataset_base):
         return dataset_base
     possible_paths = [
-        "6ab10eb3b23ba_student_resource/student_resource/dataset",
-        "student_resource/dataset",
         "dataset",
+        "student_resource/dataset",
+        "6ab10eb3b23ba_student_resource/student_resource/dataset",
         "../6ab10eb3b23ba_student_resource/student_resource/dataset",
         "/content/6ab10eb3b23ba_student_resource/student_resource/dataset",
         "/content/dataset"
@@ -40,7 +48,7 @@ def resolve_dataset_base(dataset_base: str = None) -> str:
     for p in possible_paths:
         if os.path.exists(p):
             return p
-    return possible_paths[0]
+    return "dataset"
 
 GENERIC_TOKENS = {
     'anchor', 'gurgaon', 'door', 'physical', 'exports', 'superior', 'bright', 'bhubaneswar', 'business', 'liberty', 'properties', 'marg', 'third', 'haryana', 'cedar', 'maharashtra', 'metropolitan', 'gautam', 'pacific', 'keralam', 'home', 'public', 'partners', 'oklahoma', 'interstate', 'circle', 'indiana', 'digital', 'trust', 'washington', 'cascade', 'chambers', 'gulf', 'connecticut', 'health', 'colonial', 'ahmedabad', 'mumbai', 'spring', 'traders', 'jaipur', 'kolkata', 'india', 'utah', 'wing', 'quality', 'singh', 'river', 'systems', 'square', 'residency', 'jackson', 'physicians', 'united', 'saint', 'college', 'kerala', 'desert', 'null', 'piedmont', 'logistics', 'noida', 'innovative', 'blvd', 'johnson', 'foundation', 'atlantic', 'care', 'dynamic', 'formerly', 'township', 'heritage', 'salem', 'pine', 'management', 'peak', 'strategic', 'hospital', 'forest', 'apex', 'centre', 'trading', 'wisconsin', 'safe', 'heights', 'charlotte', 'area', 'village', 'coimbatore', 'industrial', 'national', 'chiropractic', 'region', 'infra', 'alabama', 'capital', 'blue', 'rock', 'signature', 'park', 'works', 'house', 'academy', 'premier', 'empire', 'rajasthan', 'nagpur', 'products', 'california', 'nagar', 'harbor', 'housing', 'auto', 'indore', 'patriot', 'frontier', 'international', 'pioneer', 'brothers', 'star', 'louisville', 'prairie', 'lake', 'tech', 'springfield', 'little', 'andhra', 'summit', 'layout', 'county', 'pinnacle', 'golden', 'mesa', 'developers', 'missouri', 'gujarat', 'temple', 'downtown', 'union', 'smart', 'highland', 'diamond', 'carolina', 'specialists', 'nadu', 'mited', 'vill', 'pune', 'flat', 'institute', 'bangalore', 'shop', 'holdings', 'reliable', 'illinois', 'cleveland', 'karnataka', 'andheri', 'green', 'beach', 'gandhi', 'point', 'tamil', 'enclave', 'tennessee', 'royal', 'austin', 'greater', 'allied', 'garden', 'infratech', 'dental', 'grove', 'ventures', 'delhi', 'integrated', 'arizona', 'center', 'hospitality', 'modern', 'society', 'best', 'ghaziabad', 'associates', 'fresh', 'urban', 'enterprises', 'columbus', 'kentucky', 'market', 'bank', 'energy', 'navi', 'federal', 'phoenix', 'trail', 'tower', 'mount', 'valley', 'ernakulam', 'healthcare', 'crystal', 'high', 'ohio', 'cross', 'midwest', 'marketing', 'prime', 'hotel', 'lucknow', 'rocky', 'agro', 'plot', 'coastal', 'colony', 'louis', 'complex', 'maryland', 'fort', 'minnesota', 'mexico', 'continental', 'oregon', 'kumar', 'pradesh', 'pediatric', 'falls', 'bengal', 'investments', 'buddha', 'punjab', 'silver', 'advanced', 'clinic', 'ground', 'medicine', 'gali', 'alliance', 'supreme', 'surat', 'great', 'family', 'media', 'medical', 'school', 'therapy', 'springs', 'bazar', 'indianapolis', 'beacon', 'loop', 'arkansas', 'texas', 'church', 'chicago', 'dallas', 'bldg', 'grand', 'bombay', 'service', 'pllc', 'ridge', 'vate', 'precision', 'post', 'platinum', 'technology', 'view', 'producer', 'maine', 'bihar', 'creek', 'hills', 'industries', 'room', 'iowa', 'consultants', 'madhya', 'apartment', 'cardiology', 'calcutta', 'uptown', 'solutions', 'apartments', 'overseas', 'vihar', 'consultancy', 'highway', 'york', 'massachusetts', 'regional', 'mill', 'shri', 'group', 'foods', 'mandir', 'bengaluru', 'hyderabad', 'sterling', 'finance', 'vision', 'howrah', 'infrastructure', 'consulting', 'station', 'columbia', 'ward', 'plaza', 'hill', 'clear', 'pennsylvania', 'second', 'elite', 'smith', 'shree', 'global', 'sector', 'patna', 'uttar', 'technologies', 'mountain', 'chennai', 'engineering', 'delta', 'houston', 'express', 'williams', 'creative', 'estate', 'metro', 'kansas', 'sons', 'laxmi', 'services', 'white', 'phase', 'american', 'keystone', 'construction', 'horizon', 'district', 'software', 'office', 'rangareddy', 'nashville', 'thane', 'first', 'telangana', 'island', 'krishna', 'virginia', 'classic'
@@ -49,17 +57,21 @@ GENERIC_TOKENS = {
 class CandidateIndexer:
     """Class to interact with SQLite index.db for ultra-fast zero-RAM candidate lookup."""
     
-    def __init__(self, db_path: str = None, dataset_base: str = None):
-        self.db_path = resolve_db_path(db_path)
+    def __init__(self, db_path: str = None, dataset_base: str = None, split: str = "train"):
+        self.split = split
+        self.db_path = resolve_db_path(db_path, split=split)
         self.dataset_base = resolve_dataset_base(dataset_base)
         self._conn = None
         self._id_col = None
         self._records_dict = None
         self._frequent_tokens = None
-        self._ensure_tables_indexed()
+        self._ensure_tables_indexed(split=self.split)
 
     def get_connection(self):
         if self._conn is None:
+            dirname = os.path.dirname(self.db_path)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
             self._conn = sqlite3.connect(self.db_path)
         return self._conn
 
@@ -73,7 +85,7 @@ class CandidateIndexer:
         has_records = cursor.fetchone()
         
         if not has_records:
-            print("\nCreating 'records' table in SQLite index.db for Zero-RAM candidate lookups...", flush=True)
+            print(f"\nCreating 'records' table in SQLite {self.db_path} for Zero-RAM candidate lookups...", flush=True)
             cursor.execute("PRAGMA synchronous = OFF")
             cursor.execute("PRAGMA journal_mode = MEMORY")
             cursor.execute("""
@@ -123,7 +135,7 @@ class CandidateIndexer:
         has_token_index = cursor.fetchone()
         
         if not has_token_index:
-            print("\nCreating 'token_index' table and B-Tree index in SQLite index.db...", flush=True)
+            print(f"\nCreating 'token_index' table and B-Tree index in SQLite {self.db_path}...", flush=True)
             cursor.execute("PRAGMA synchronous = OFF")
             cursor.execute("PRAGMA journal_mode = MEMORY")
             cursor.execute("""
@@ -139,10 +151,13 @@ class CandidateIndexer:
             print(f"Generating search tokens across {total_recs:,} candidate records...", flush=True)
             
             chunk_size = 100000
-            offset = 0
-            while offset < total_recs:
-                cursor.execute("SELECT record_id, name, address FROM records LIMIT ? OFFSET ?", (chunk_size, offset))
-                rows = cursor.fetchall()
+            select_cursor = conn.cursor()
+            select_cursor.execute("SELECT record_id, name, address FROM records")
+            indexed_count = 0
+            while True:
+                rows = select_cursor.fetchmany(chunk_size)
+                if not rows:
+                    break
                 token_rows = []
                 for rec_id, name, addr in rows:
                     tokens = extract_tokens(name, addr)
@@ -150,9 +165,10 @@ class CandidateIndexer:
                         token_rows.append((tok, rec_id))
                 
                 cursor.executemany("INSERT INTO token_index (token, record_id) VALUES (?, ?)", token_rows)
-                offset += len(rows)
+                indexed_count += len(rows)
                 conn.commit()
-                print(f"  Indexed tokens for {offset:,} / {total_recs:,} records...", flush=True)
+                print(f"  Indexed tokens for {indexed_count:,} / {total_recs:,} records...", flush=True)
+            select_cursor.close()
 
             print("Building B-Tree index on token_index(token)...", flush=True)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_token ON token_index(token)")

@@ -23,11 +23,11 @@ from src.model import EntityResolutionModel
 from src.submission import save_candidate_pairs, save_matching_results, validate_outputs
 
 def find_dataset_base() -> str:
-    """Dynamically resolves dataset folder location across local and Colab environments."""
+    """Dynamically resolves dataset folder location across local, SageMaker, and Colab environments."""
     possible_paths = [
-        "6ab10eb3b23ba_student_resource/student_resource/dataset",
-        "student_resource/dataset",
         "dataset",
+        "student_resource/dataset",
+        "6ab10eb3b23ba_student_resource/student_resource/dataset",
         "../6ab10eb3b23ba_student_resource/student_resource/dataset",
         "/content/6ab10eb3b23ba_student_resource/student_resource/dataset",
         "/content/dataset"
@@ -35,15 +35,18 @@ def find_dataset_base() -> str:
     for p in possible_paths:
         if os.path.exists(p):
             return p
-    return possible_paths[0]
+    return "dataset"
 
-def find_db_path(split: str = "train") -> str:
-    """Dynamically resolves SQLite index.db location across local and Colab environments."""
+def find_db_path(split: str = "train", explicit_path: str = None) -> str:
+    """Dynamically resolves SQLite index.db location across local, SageMaker, and Colab environments."""
+    if explicit_path:
+        return explicit_path
     db_name = f"index_{split}.db" if split != "train" else "index.db"
     possible_paths = [
+        db_name,
+        os.path.join("dataset", db_name),
         f"6ab10eb3b23ba_student_resource/student_resource/{db_name}",
         f"student_resource/{db_name}",
-        db_name,
         f"../6ab10eb3b23ba_student_resource/student_resource/{db_name}",
         f"/content/6ab10eb3b23ba_student_resource/student_resource/{db_name}",
         f"/content/{db_name}"
@@ -51,7 +54,7 @@ def find_db_path(split: str = "train") -> str:
     for p in possible_paths:
         if os.path.exists(p):
             return p
-    return possible_paths[0]
+    return db_name
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Business Entity Resolution Pipeline")
@@ -59,11 +62,12 @@ def parse_args():
     parser.add_argument("--max-candidates", type=int, default=30, help="Max candidates per entity from index.db (default 30)")
     parser.add_argument("--split", type=str, default="train", choices=["train", "test"], help="Dataset split to run on (train or test)")
     parser.add_argument("--no-cache", action="store_true", help="Disable caching of extracted features")
+    parser.add_argument("--db-path", type=str, default=None, help="Explicit path to SQLite index.db (optional)")
     return parser.parse_args()
 
-def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str = "train", no_cache: bool = False):
+def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str = "train", no_cache: bool = False, db_path_arg: str = None):
     dataset_base = find_dataset_base()
-    db_path = find_db_path(split=split)
+    db_path = find_db_path(split=split, explicit_path=db_path_arg)
 
     print("=" * 70, flush=True)
     print(f"   BUSINESS ENTITY RESOLUTION PIPELINE ({split.upper()} SET)   ", flush=True)
@@ -145,7 +149,7 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
 
     if not loaded_from_cache:
         print(f"\n[2/5] Initializing Zero-RAM SQLite Disk Index ({split.upper()} set)...", flush=True)
-        indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base)
+        indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split=split)
         indexer.load_records_dict()
         
         print("Pre-caching frequent tokens to accelerate searches...", flush=True)
@@ -217,31 +221,45 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
     X_df = pd.DataFrame(features_list)
     y_arr = np.array(labels_list)
 
-    print("\n[4/5] Training LightGBM Classifier & Tuning Macro F0.5 Threshold...", flush=True)
-    model = EntityResolutionModel()
-    
-    # Train/Val split if ground truth matches exist
-    if len(y_arr) > 0 and np.sum(y_arr) > 0:
-        groups_arr = np.array([p[0] for p in all_candidate_pairs])
+    model_save_path = "output/lgb_model.pkl"
+    if split == "train":
+        print("\n[4/5] Training LightGBM Classifier & Tuning Macro F0.5 Threshold...", flush=True)
+        model = EntityResolutionModel()
         
-        # 100% Leak-proof Grouped Validation Split (80/20)
-        unique_groups = df_s1['record_id'].astype(str).unique()
-        split_idx_group = int(len(unique_groups) * 0.8)
-        val_groups_set = set(unique_groups[split_idx_group:])
+        # Train/Val split if ground truth matches exist
+        if len(y_arr) > 0 and np.sum(y_arr) > 0:
+            groups_arr = np.array([p[0] for p in all_candidate_pairs])
+            
+            # 100% Leak-proof Grouped Validation Split (80/20)
+            unique_groups = df_s1['record_id'].astype(str).unique()
+            split_idx_group = int(len(unique_groups) * 0.8)
+            val_groups_set = set(unique_groups[split_idx_group:])
+            
+            is_val = np.array([g in val_groups_set for g in groups_arr])
+            
+            X_train = X_df[~is_val]
+            y_train = y_arr[~is_val]
+            
+            X_val = X_df[is_val]
+            y_val = y_arr[is_val]
+            val_groups = groups_arr[is_val]
+            
+            model.train(X_train, y_train, X_val, y_val, val_groups=val_groups)
+            print(f"Optimal Macro F0.5 Threshold: {model.optimal_threshold:.3f}", flush=True)
+        else:
+            model.train(X_df, y_arr)
         
-        is_val = np.array([g in val_groups_set for g in groups_arr])
-        
-        X_train = X_df[~is_val]
-        y_train = y_arr[~is_val]
-        
-        X_val = X_df[is_val]
-        y_val = y_arr[is_val]
-        val_groups = groups_arr[is_val]
-        
-        model.train(X_train, y_train, X_val, y_val, val_groups=val_groups)
-        print(f"Optimal Macro F0.5 Threshold: {model.optimal_threshold:.3f}", flush=True)
+        # Persist trained model to disk
+        model.save(model_save_path)
     else:
-        model.train(X_df, y_arr)
+        # Split is 'test': load pre-trained model from training run
+        if os.path.exists(model_save_path):
+            print(f"\n[4/5] Loading trained LightGBM model from {model_save_path}...", flush=True)
+            model = EntityResolutionModel.load(model_save_path)
+        else:
+            print(f"\n[4/5] Notice: Pre-trained model not found at {model_save_path}. Initializing default classifier...", flush=True)
+            model = EntityResolutionModel()
+            model.optimal_threshold = 0.5
 
     # Generate pairwise predictions
     preds = model.predict(X_df)
@@ -264,4 +282,10 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_pipeline(sample_size=args.sample_size, max_candidates=args.max_candidates, split=args.split, no_cache=args.no_cache)
+    run_pipeline(
+        sample_size=args.sample_size,
+        max_candidates=args.max_candidates,
+        split=args.split,
+        no_cache=args.no_cache,
+        db_path_arg=args.db_path
+    )
