@@ -117,6 +117,9 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
     print(f"\n[2/5] Initializing Zero-RAM SQLite Disk Index ({split.upper()} set)...", flush=True)
     indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base)
     indexer.load_records_dict()
+    
+    print("Pre-caching frequent tokens to accelerate searches...", flush=True)
+    indexer.get_frequent_tokens()
 
     print(f"\nQuerying SQLite B-Tree index and building feature vectors (max_candidates={max_candidates})...", flush=True)
     all_candidate_pairs = []
