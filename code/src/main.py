@@ -135,6 +135,7 @@ def parse_args():
     return parser.parse_args()
 
 def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str = "train", no_cache: bool = False, db_path_arg: str = None, num_workers: int = None):
+    global _GLOBAL_RECORDS_DICT
     if num_workers is None:
         num_workers = min(8, os.cpu_count() or 4)
     dataset_base = find_dataset_base()
@@ -231,7 +232,6 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
             f_match.write("source1_entity_id\tmatched_entity_ids\n")
 
             if num_workers > 1:
-                global _GLOBAL_RECORDS_DICT
                 _GLOBAL_RECORDS_DICT = indexer._records_dict
                 indexer.close()  # CRITICAL: Close SQLite connection in parent before fork to avoid deadlock in workers
 
@@ -328,7 +328,6 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         del df_s1, s1_records
         if "chunks" in locals():
             del chunks
-        global _GLOBAL_RECORDS_DICT
         _GLOBAL_RECORDS_DICT = None
         gc.collect()
 
