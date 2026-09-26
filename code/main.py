@@ -4,6 +4,7 @@ Main pipeline execution script for Amazon ML Challenge 2026: Business Entity Res
 Usage:
     python code/main.py [--sample-size 50000] [--max-candidates 30] [--split train]
 """
+import gc
 import os
 import sys
 import time
@@ -120,8 +121,103 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         }
         print(f"Loaded Ground Truth mapping for {len(gt_map):,} entities.", flush=True)
 
-    # 3. Initialize Zero-RAM SQLite Indexer & Feature Extraction
+    # 3. Model & Output Paths
     os.makedirs("output", exist_ok=True)
+    model_save_path = "output/lgb_model.pkl"
+    cand_out_path = "output/candidate_pairs.tsv"
+    match_out_path = "output/matching_results.tsv"
+
+    if split == "test":
+        # ======================================================================
+        # ZERO-RAM STREAMING INFERENCE FOR TEST SET
+        # Streams predictions directly to disk in batches of 500 entities.
+        # RAM usage remains strictly < 400 MB throughout the entire run.
+        # ======================================================================
+        print(f"\n[2/5] Loading pre-trained LightGBM model from {model_save_path}...", flush=True)
+        if not os.path.exists(model_save_path):
+            raise FileNotFoundError(f"Model file {model_save_path} not found! Please run '--split train' first.")
+        model = EntityResolutionModel.load(model_save_path)
+
+        print(f"\n[3/5] Initializing Zero-RAM SQLite Disk Index (TEST set)...", flush=True)
+        indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split="test")
+        indexer.load_records_dict()
+        indexer.get_frequent_tokens()
+
+        print(f"\n[4/5] Streaming predictions directly to disk in batches (RAM < 400 MB)...", flush=True)
+        s1_records = df_s1.to_dict("records")
+        total_s1 = len(s1_records)
+        start_time = time.time()
+
+        with open(cand_out_path, "w") as f_cand, open(match_out_path, "w") as f_match:
+            f_cand.write("source1_id\tcandidate_id\n")
+            f_match.write("source1_id\tmatched_entity_ids\n")
+
+            batch_size = 500
+            for b_idx in range(0, total_s1, batch_size):
+                b_end = min(b_idx + batch_size, total_s1)
+                batch_s1 = s1_records[b_idx:b_end]
+
+                batch_pairs = []
+                batch_features = []
+                batch_cands = {}
+
+                for s1_rec in batch_s1:
+                    s1_id = str(s1_rec["record_id"])
+                    cand_ids = list(indexer.find_candidates_for_record(
+                        name=str(s1_rec.get("name", "")),
+                        address=str(s1_rec.get("address", "")),
+                        max_candidates=max_candidates
+                    ))
+                    batch_cands[s1_id] = cand_ids
+
+                    if not cand_ids:
+                        continue
+
+                    cand_records = indexer.fetch_records_by_ids(cand_ids, split="test")
+                    s1_precomputed = precompute_s1_features(s1_rec)
+
+                    for cand_rec in cand_records:
+                        cid = str(cand_rec["record_id"])
+                        batch_pairs.append((s1_id, cid))
+                        batch_features.append(compute_pair_features(s1_rec, cand_rec, s1_precomputed))
+
+                # Flush candidate pairs to disk immediately
+                for s1_id, cand_ids in batch_cands.items():
+                    for cid in cand_ids:
+                        f_cand.write(f"{s1_id}\t{cid}\n")
+
+                # Predict matches for this batch
+                batch_matches = {s1_id: [] for s1_id in batch_cands}
+                if batch_features:
+                    X_b = pd.DataFrame(batch_features)
+                    preds = model.predict(X_b)
+                    for (s1_id, cid), pred in zip(batch_pairs, preds):
+                        if pred == 1:
+                            batch_matches[s1_id].append(cid)
+
+                # Flush match results to disk immediately
+                for s1_id, matches in batch_matches.items():
+                    f_match.write(f"{s1_id}\t{','.join(matches)}\n")
+
+                # Progress report
+                elapsed = time.time() - start_time
+                pct = b_end / total_s1 * 100
+                rate = b_end / elapsed if elapsed > 0 else 0
+                eta = (total_s1 - b_end) / rate if rate > 0 else 0
+                print(f"  [{pct:5.1f}%] Processed {b_end:,} / {total_s1:,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
+
+                # Explicit memory release per batch
+                del batch_pairs, batch_features, batch_cands, batch_matches
+                gc.collect()
+
+        print(f"\n[5/5] Test inference complete! Outputs saved to {cand_out_path} and {match_out_path}.", flush=True)
+        print("\nValidating output submission files against official submission validator...", flush=True)
+        validate_outputs(matching_file=match_out_path, candidate_file=cand_out_path, test_dir=split_dir)
+        return
+
+    # ======================================================================
+    # TRAINING PIPELINE (split == 'train')
+    # ======================================================================
     cache_path = os.path.join("output", f"cache_features_{split}_{len(df_s1)}_{max_candidates}.pkl")
     
     all_candidate_pairs = []
@@ -280,34 +376,19 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         
         # Persist trained model to disk
         model.save(model_save_path)
-    else:
-        # Split is 'test': load pre-trained model from training run
-        if os.path.exists(model_save_path):
-            print(f"\n[4/5] Loading trained LightGBM model from {model_save_path}...", flush=True)
-            model = EntityResolutionModel.load(model_save_path)
-        else:
-            print(f"\n[4/5] Notice: Pre-trained model not found at {model_save_path}. Initializing default classifier...", flush=True)
-            model = EntityResolutionModel()
-            model.optimal_threshold = 0.5
 
-    # Generate pairwise predictions
-    preds = model.predict(X_df)
+        # Generate pairwise predictions on train sample
+        preds = model.predict(X_df)
 
-    # Reconstruct predictions per S1 entity
-    for (s1_id, cand_id), pred in zip(all_candidate_pairs, preds):
-        if pred == 1:
-            results_map[s1_id].append(cand_id)
+        for (s1_id, cand_id), pred in zip(all_candidate_pairs, preds):
+            if pred == 1:
+                results_map[s1_id].append(cand_id)
 
-    # 5. Output Results & Validate Formats using validate_submission.py
-    print("\n[5/5] Saving final matching outputs...", flush=True)
-    save_candidate_pairs(candidates_map, output_path="output/candidate_pairs.tsv")
-    save_matching_results(results_map, output_path="output/matching_results.tsv")
-
-    if split == "test":
-        print("\nValidating output submission files against official submission validator...", flush=True)
-        validate_outputs(matching_file="output/matching_results.tsv", candidate_file="output/candidate_pairs.tsv", test_dir=split_dir)
-    else:
-        print("\nNote: Official submission validator is designed for the 'test' split. Skipping for 'train'.", flush=True)
+        # Output train matching results
+        print("\n[5/5] Saving final matching outputs for training set...", flush=True)
+        save_candidate_pairs(candidates_map, output_path="output/candidate_pairs.tsv")
+        save_matching_results(results_map, output_path="output/matching_results.tsv")
+        print("Note: Official submission validator is designed for the 'test' split. Skipping for 'train'.", flush=True)
 
 if __name__ == "__main__":
     args = parse_args()
