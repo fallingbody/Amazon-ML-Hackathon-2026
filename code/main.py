@@ -183,11 +183,23 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
     
     # Train/Val split if ground truth matches exist
     if len(y_arr) > 0 and np.sum(y_arr) > 0:
-        split_idx = int(len(X_df) * 0.8)
-        X_train, X_val = X_df.iloc[:split_idx], X_df.iloc[split_idx:]
-        y_train, y_val = y_arr[:split_idx], y_arr[split_idx:]
+        groups_arr = np.array([p[0] for p in all_candidate_pairs])
         
-        model.train(X_train, y_train, X_val, y_val)
+        # 100% Leak-proof Grouped Validation Split (80/20)
+        unique_groups = df_s1['record_id'].astype(str).unique()
+        split_idx_group = int(len(unique_groups) * 0.8)
+        val_groups_set = set(unique_groups[split_idx_group:])
+        
+        is_val = np.array([g in val_groups_set for g in groups_arr])
+        
+        X_train = X_df[~is_val]
+        y_train = y_arr[~is_val]
+        
+        X_val = X_df[is_val]
+        y_val = y_arr[is_val]
+        val_groups = groups_arr[is_val]
+        
+        model.train(X_train, y_train, X_val, y_val, val_groups=val_groups)
         print(f"Optimal Macro F0.5 Threshold: {model.optimal_threshold:.3f}", flush=True)
     else:
         model.train(X_df, y_arr)
