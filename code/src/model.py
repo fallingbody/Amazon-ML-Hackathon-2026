@@ -1,6 +1,7 @@
 """
 Module: model.py
 LightGBM Classifier model training, evaluation, and Macro F0.5 score threshold optimization.
+Supports GPU acceleration.
 """
 import numpy as np
 import pandas as pd
@@ -17,7 +18,7 @@ def calculate_f_beta(precision: float, recall: float, beta: float = 0.5) -> floa
 class EntityResolutionModel:
     """LightGBM model wrapper for Business Entity Resolution pair matching."""
     
-    def __init__(self, n_estimators: int = 200, learning_rate: float = 0.05):
+    def __init__(self, n_estimators: int = 200, learning_rate: float = 0.05, use_gpu: bool = True):
         self.params = {
             "objective": "binary",
             "metric": "binary_logloss",
@@ -28,7 +29,18 @@ class EntityResolutionModel:
             "num_leaves": 31,
             "verbose": -1
         }
-        self.clf = lgb.LGBMClassifier(**self.params)
+        
+        # Enable GPU acceleration if supported
+        if use_gpu:
+            try:
+                self.params["device"] = "gpu"
+                self.clf = lgb.LGBMClassifier(**self.params)
+            except Exception:
+                self.params["device"] = "cpu"
+                self.clf = lgb.LGBMClassifier(**self.params)
+        else:
+            self.clf = lgb.LGBMClassifier(**self.params)
+
         self.optimal_threshold = 0.5
 
     def train(self, X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame = None, y_val: pd.Series = None):
