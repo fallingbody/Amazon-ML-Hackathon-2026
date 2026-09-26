@@ -306,15 +306,23 @@ def main():
     )
     args = parser.parse_args()
 
-    # candidate_pairs.tsv is optional; default to the conventional path and let
-    # validate() skip (with a warning) if the file isn't there.
-    candidate_path = args.candidate or "output/candidate_pairs.tsv"
+    matching_path = args.matching
+    if matching_path == "output/matching_results.tsv" and not os.path.isfile(matching_path) and os.path.isfile("output/test/matching_results.tsv"):
+        matching_path = "output/test/matching_results.tsv"
+
+    # candidate_pairs.tsv is optional; default to conventional path
+    candidate_path = args.candidate
+    if not candidate_path:
+        if os.path.isfile("output/test/candidate_pairs.tsv"):
+            candidate_path = "output/test/candidate_pairs.tsv"
+        else:
+            candidate_path = "output/candidate_pairs.tsv"
 
     print("ML Challenge 2026 — submission validator")
     print(f"  test dir: {args.test_dir}")
     try:
         errors, warnings = validate(
-            args.matching, candidate_path, args.test_dir, check_ids=args.check_ids
+            matching_path, candidate_path, args.test_dir, check_ids=args.check_ids
         )
     except UnicodeDecodeError:
         print()

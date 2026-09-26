@@ -39,13 +39,18 @@ def save_matching_results(results_map: Dict[str, List[str]], output_path: str = 
     print(f"Saved final matching results ({len(results_map):,} entities) to {output_path}")
 
 def validate_outputs(
-    matching_file: str = "output/matching_results.tsv",
-    candidate_file: str = "output/candidate_pairs.tsv",
+    matching_file: str = "output/test/matching_results.tsv",
+    candidate_file: str = "output/test/candidate_pairs.tsv",
     test_dir: str = None
 ) -> bool:
     """
     Runs the official competition validator (validate_submission.py) to check TSV outputs.
     """
+    if not os.path.exists(matching_file) and os.path.exists("output/matching_results.tsv"):
+        matching_file = "output/matching_results.tsv"
+    if not os.path.exists(candidate_file) and os.path.exists("output/candidate_pairs.tsv"):
+        candidate_file = "output/candidate_pairs.tsv"
+
     if not test_dir or not os.path.exists(test_dir):
         possible_test_dirs = [
             "dataset/test",

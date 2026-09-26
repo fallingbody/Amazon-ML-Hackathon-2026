@@ -121,11 +121,19 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         }
         print(f"Loaded Ground Truth mapping for {len(gt_map):,} entities.", flush=True)
 
-    # 3. Model & Output Paths
-    os.makedirs("output", exist_ok=True)
-    model_save_path = "output/lgb_model.pkl"
-    cand_out_path = "output/candidate_pairs.tsv"
-    match_out_path = "output/matching_results.tsv"
+    # 3. Model & Output Paths (Separate folders for Training vs Testing/Submission)
+    train_dir = os.path.join("output", "train")
+    test_dir = os.path.join("output", "test")
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(test_dir, exist_ok=True)
+
+    out_dir = test_dir if split == "test" else train_dir
+    cand_out_path = os.path.join(out_dir, "candidate_pairs.tsv")
+    match_out_path = os.path.join(out_dir, "matching_results.tsv")
+
+    # Locate model: checks output/train/lgb_model.pkl, falls back to output/lgb_model.pkl
+    model_save_path = os.path.join(train_dir, "lgb_model.pkl")
+    model_load_path = model_save_path if os.path.exists(model_save_path) else "output/lgb_model.pkl"
 
     if split == "test":
         # ======================================================================
@@ -133,10 +141,10 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         # Streams predictions directly to disk in batches of 500 entities.
         # RAM usage remains strictly < 400 MB throughout the entire run.
         # ======================================================================
-        print(f"\n[2/5] Loading pre-trained LightGBM model from {model_save_path}...", flush=True)
-        if not os.path.exists(model_save_path):
-            raise FileNotFoundError(f"Model file {model_save_path} not found! Please run '--split train' first.")
-        model = EntityResolutionModel.load(model_save_path)
+        print(f"\n[2/5] Loading pre-trained LightGBM model from {model_load_path}...", flush=True)
+        if not os.path.exists(model_load_path):
+            raise FileNotFoundError(f"Model file {model_load_path} not found! Please run '--split train' first.")
+        model = EntityResolutionModel.load(model_load_path)
 
         print(f"\n[3/5] Initializing Zero-RAM SQLite Disk Index (TEST set)...", flush=True)
         indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split="test")
@@ -223,7 +231,10 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
     # ======================================================================
     # TRAINING PIPELINE (split == 'train')
     # ======================================================================
-    cache_path = os.path.join("output", f"cache_features_{split}_{len(df_s1)}_{max_candidates}.pkl")
+    cache_path = os.path.join(train_dir, f"cache_features_{split}_{len(df_s1)}_{max_candidates}.pkl")
+    legacy_cache_path = os.path.join("output", f"cache_features_{split}_{len(df_s1)}_{max_candidates}.pkl")
+    if not os.path.exists(cache_path) and os.path.exists(legacy_cache_path):
+        cache_path = legacy_cache_path
     
     all_candidate_pairs = []
     candidates_map = {}
@@ -406,6 +417,10 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         
         # Persist trained model to disk
         model.save(model_save_path)
+        try:
+            model.save("output/lgb_model.pkl")
+        except Exception:
+            pass
 
         # Generate pairwise predictions on train sample
         preds = model.predict(X_df)
@@ -415,9 +430,9 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
                 results_map[s1_id].append(cand_id)
 
         # Output train matching results
-        print("\n[5/5] Saving final matching outputs for training set...", flush=True)
-        save_candidate_pairs(candidates_map, output_path="output/candidate_pairs.tsv")
-        save_matching_results(results_map, output_path="output/matching_results.tsv")
+        print(f"\n[5/5] Saving final matching outputs for training set to {cand_out_path} and {match_out_path}...", flush=True)
+        save_candidate_pairs(candidates_map, output_path=cand_out_path)
+        save_matching_results(results_map, output_path=match_out_path)
         print("Note: Official submission validator is designed for the 'test' split. Skipping for 'train'.", flush=True)
 
 if __name__ == "__main__":
