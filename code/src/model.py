@@ -18,7 +18,7 @@ def calculate_f_beta(precision: float, recall: float, beta: float = 0.5) -> floa
 class EntityResolutionModel:
     """LightGBM model wrapper for Business Entity Resolution pair matching."""
     
-    def __init__(self, n_estimators: int = 200, learning_rate: float = 0.05, use_gpu: bool = True):
+    def __init__(self, n_estimators: int = 200, learning_rate: float = 0.05, use_gpu: bool = False):
         self.params = {
             "objective": "binary",
             "metric": "binary_logloss",
@@ -27,34 +27,45 @@ class EntityResolutionModel:
             "learning_rate": learning_rate,
             "max_depth": 6,
             "num_leaves": 31,
-            "verbose": -1
+            "verbose": -1,
+            "n_jobs": -1
         }
         
-        # Enable GPU acceleration if supported
+        # Configure device (CPU by default with all cores; GPU if requested)
         if use_gpu:
-            try:
-                self.params["device"] = "gpu"
-                self.clf = lgb.LGBMClassifier(**self.params)
-            except Exception:
-                self.params["device"] = "cpu"
-                self.clf = lgb.LGBMClassifier(**self.params)
+            self.params["device"] = "gpu"
         else:
-            self.clf = lgb.LGBMClassifier(**self.params)
+            self.params["device"] = "cpu"
 
+        self.clf = lgb.LGBMClassifier(**self.params)
         self.optimal_threshold = 0.5
 
     def train(self, X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame = None, y_val: pd.Series = None, val_groups: np.ndarray = None):
-        """Trains the LightGBM classifier on pair features."""
+        """Trains the LightGBM classifier on pair features with automatic fallback to CPU if GPU/OpenCL is unavailable."""
+        def _fit_model():
+            if X_val is not None and y_val is not None:
+                self.clf.fit(
+                    X_train, y_train,
+                    eval_set=[(X_val, y_val)],
+                    callbacks=[lgb.early_stopping(50, verbose=False)]
+                )
+            else:
+                self.clf.fit(X_train, y_train)
+
+        try:
+            _fit_model()
+        except lgb.basic.LightGBMError as e:
+            if "OpenCL" in str(e) or "GPU" in str(e) or "gpu" in str(e):
+                print("\n[Notice] No OpenCL/GPU device detected for LightGBM. Automatically falling back to multi-core CPU...", flush=True)
+                self.params["device"] = "cpu"
+                self.clf = lgb.LGBMClassifier(**self.params)
+                _fit_model()
+            else:
+                raise e
+
         if X_val is not None and y_val is not None:
-            self.clf.fit(
-                X_train, y_train,
-                eval_set=[(X_val, y_val)],
-                callbacks=[lgb.early_stopping(50, verbose=False)]
-            )
             val_probs = self.clf.predict_proba(X_val)[:, 1]
             self.optimal_threshold = self.optimize_f05_threshold(y_val, val_probs, groups=val_groups)
-        else:
-            self.clf.fit(X_train, y_train)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         """Returns match probabilities for given feature set."""

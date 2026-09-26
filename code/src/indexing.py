@@ -7,7 +7,7 @@ import os
 import sqlite3
 import pandas as pd
 from typing import List, Set, Dict, Any
-from .preprocessing import extract_tokens
+from .preprocessing import extract_tokens, clean_text
 
 def resolve_db_path(db_path: str = None) -> str:
     if db_path and os.path.exists(db_path):
@@ -41,6 +41,10 @@ def resolve_dataset_base(dataset_base: str = None) -> str:
         if os.path.exists(p):
             return p
     return possible_paths[0]
+
+GENERIC_TOKENS = {
+    'anchor', 'gurgaon', 'door', 'physical', 'exports', 'superior', 'bright', 'bhubaneswar', 'business', 'liberty', 'properties', 'marg', 'third', 'haryana', 'cedar', 'maharashtra', 'metropolitan', 'gautam', 'pacific', 'keralam', 'home', 'public', 'partners', 'oklahoma', 'interstate', 'circle', 'indiana', 'digital', 'trust', 'washington', 'cascade', 'chambers', 'gulf', 'connecticut', 'health', 'colonial', 'ahmedabad', 'mumbai', 'spring', 'traders', 'jaipur', 'kolkata', 'india', 'utah', 'wing', 'quality', 'singh', 'river', 'systems', 'square', 'residency', 'jackson', 'physicians', 'united', 'saint', 'college', 'kerala', 'desert', 'null', 'piedmont', 'logistics', 'noida', 'innovative', 'blvd', 'johnson', 'foundation', 'atlantic', 'care', 'dynamic', 'formerly', 'township', 'heritage', 'salem', 'pine', 'management', 'peak', 'strategic', 'hospital', 'forest', 'apex', 'centre', 'trading', 'wisconsin', 'safe', 'heights', 'charlotte', 'area', 'village', 'coimbatore', 'industrial', 'national', 'chiropractic', 'region', 'infra', 'alabama', 'capital', 'blue', 'rock', 'signature', 'park', 'works', 'house', 'academy', 'premier', 'empire', 'rajasthan', 'nagpur', 'products', 'california', 'nagar', 'harbor', 'housing', 'auto', 'indore', 'patriot', 'frontier', 'international', 'pioneer', 'brothers', 'star', 'louisville', 'prairie', 'lake', 'tech', 'springfield', 'little', 'andhra', 'summit', 'layout', 'county', 'pinnacle', 'golden', 'mesa', 'developers', 'missouri', 'gujarat', 'temple', 'downtown', 'union', 'smart', 'highland', 'diamond', 'carolina', 'specialists', 'nadu', 'mited', 'vill', 'pune', 'flat', 'institute', 'bangalore', 'shop', 'holdings', 'reliable', 'illinois', 'cleveland', 'karnataka', 'andheri', 'green', 'beach', 'gandhi', 'point', 'tamil', 'enclave', 'tennessee', 'royal', 'austin', 'greater', 'allied', 'garden', 'infratech', 'dental', 'grove', 'ventures', 'delhi', 'integrated', 'arizona', 'center', 'hospitality', 'modern', 'society', 'best', 'ghaziabad', 'associates', 'fresh', 'urban', 'enterprises', 'columbus', 'kentucky', 'market', 'bank', 'energy', 'navi', 'federal', 'phoenix', 'trail', 'tower', 'mount', 'valley', 'ernakulam', 'healthcare', 'crystal', 'high', 'ohio', 'cross', 'midwest', 'marketing', 'prime', 'hotel', 'lucknow', 'rocky', 'agro', 'plot', 'coastal', 'colony', 'louis', 'complex', 'maryland', 'fort', 'minnesota', 'mexico', 'continental', 'oregon', 'kumar', 'pradesh', 'pediatric', 'falls', 'bengal', 'investments', 'buddha', 'punjab', 'silver', 'advanced', 'clinic', 'ground', 'medicine', 'gali', 'alliance', 'supreme', 'surat', 'great', 'family', 'media', 'medical', 'school', 'therapy', 'springs', 'bazar', 'indianapolis', 'beacon', 'loop', 'arkansas', 'texas', 'church', 'chicago', 'dallas', 'bldg', 'grand', 'bombay', 'service', 'pllc', 'ridge', 'vate', 'precision', 'post', 'platinum', 'technology', 'view', 'producer', 'maine', 'bihar', 'creek', 'hills', 'industries', 'room', 'iowa', 'consultants', 'madhya', 'apartment', 'cardiology', 'calcutta', 'uptown', 'solutions', 'apartments', 'overseas', 'vihar', 'consultancy', 'highway', 'york', 'massachusetts', 'regional', 'mill', 'shri', 'group', 'foods', 'mandir', 'bengaluru', 'hyderabad', 'sterling', 'finance', 'vision', 'howrah', 'infrastructure', 'consulting', 'station', 'columbia', 'ward', 'plaza', 'hill', 'clear', 'pennsylvania', 'second', 'elite', 'smith', 'shree', 'global', 'sector', 'patna', 'uttar', 'technologies', 'mountain', 'chennai', 'engineering', 'delta', 'houston', 'express', 'williams', 'creative', 'estate', 'metro', 'kansas', 'sons', 'laxmi', 'services', 'white', 'phase', 'american', 'keystone', 'construction', 'horizon', 'district', 'software', 'office', 'rangareddy', 'nashville', 'thane', 'first', 'telangana', 'island', 'krishna', 'virginia', 'classic'
+}
 
 class CandidateIndexer:
     """Class to interact with SQLite index.db for ultra-fast zero-RAM candidate lookup."""
@@ -178,20 +182,12 @@ class CandidateIndexer:
         return self._records_dict
 
     def get_frequent_tokens(self) -> Set[str]:
-        """Pre-caches generic tokens appearing in > 25,000 records to avoid fetching millions of non-discriminating candidates."""
-        if self._frequent_tokens is not None:
-            return self._frequent_tokens
-
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT token FROM token_index GROUP BY token HAVING COUNT(*) > 25000")
-        rows = cursor.fetchall()
-        self._frequent_tokens = {r[0] for r in rows}
-        return self._frequent_tokens
+        """Returns pre-cached generic tokens appearing in > 25,000 records."""
+        return GENERIC_TOKENS
 
     def find_candidates_for_record(self, name: str, address: str, max_candidates: int = 50) -> Set[str]:
         """
-        Extracts informative search tokens and retrieves candidate IDs using single batch IN SQL query.
+        Extracts informative search tokens and retrieves candidates with in-memory lexical re-ranking.
         """
         all_tokens = list(extract_tokens(name, address))
         if not all_tokens:
@@ -205,17 +201,43 @@ class CandidateIndexer:
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        candidate_counts = {}
-        # Query each token individually with a strict limit to guarantee we don't miss rare tokens
-        # while preventing any single common token from causing thousands of disk reads.
-        for token in tokens:
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 200", (token,))
+        # Query top 5 tokens with limit 400 each to avoid early cutoff
+        candidate_pool = set()
+        for token in tokens[:5]:
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 400", (token,))
             for (rec_id,) in cursor.fetchall():
-                candidate_counts[rec_id] = candidate_counts.get(rec_id, 0) + 1
+                candidate_pool.add(rec_id)
 
-        # Sort candidates by number of matching tokens in descending order
-        sorted_candidates = sorted(candidate_counts.items(), key=lambda x: x[1], reverse=True)
-        return {rec_id for rec_id, _ in sorted_candidates[:max_candidates]}
+        if not candidate_pool:
+            return set()
+
+        # Fast in-memory lexical re-ranking using pre-cached records dict
+        if self._records_dict:
+            s1_clean_name = clean_text(name).split()
+            s1_name_words = set(s1_clean_name)
+            s1_addr_words = set(clean_text(address).split())
+            s1_first_word = s1_clean_name[0] if s1_clean_name else ""
+
+            scored_candidates = []
+            for cid in candidate_pool:
+                rec = self._records_dict.get(cid)
+                if not rec:
+                    continue
+                c_name_raw = rec["name"].lower().split()
+                c_name_words = set(c_name_raw)
+                c_addr_words = set(rec["address"].lower().split())
+
+                name_overlap = len(s1_name_words & c_name_words)
+                addr_overlap = len(s1_addr_words & c_addr_words)
+                first_word_bonus = 2 if (s1_first_word and c_name_raw and s1_first_word == c_name_raw[0]) else 0
+
+                score = name_overlap * 3 + addr_overlap + first_word_bonus
+                scored_candidates.append((cid, score))
+
+            scored_candidates.sort(key=lambda x: x[1], reverse=True)
+            return {cid for cid, _ in scored_candidates[:max_candidates]}
+
+        return set(list(candidate_pool)[:max_candidates])
 
     def fetch_records_by_ids(self, record_ids: List[str], split: str = "train") -> List[Dict[str, str]]:
         """

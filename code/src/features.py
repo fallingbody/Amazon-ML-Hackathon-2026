@@ -50,11 +50,13 @@ def precompute_s1_features(s1_rec: Dict[str, Any]) -> Dict[str, Any]:
     """Precomputes string tokens and n-grams for S1 record to avoid recalculating it 30 times per candidate."""
     name1 = clean_text(s1_rec.get("name", ""))
     addr1 = clean_text(s1_rec.get("address", ""))
+    words_name1 = name1.split()
     
     return {
         "name1": name1,
         "addr1": addr1,
-        "tokens_name1": set(name1.split()),
+        "tokens_name1": set(words_name1),
+        "first_word1": words_name1[0] if words_name1 else "",
         "ngram_name1": char_ngrams(name1, n=3),
         "tokens_addr1": set(addr1.split()),
         "ngram_addr1": char_ngrams(addr1, n=3),
@@ -72,6 +74,7 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
         name1 = s1_precomputed["name1"]
         addr1 = s1_precomputed["addr1"]
         tokens_name1 = s1_precomputed["tokens_name1"]
+        first_word1 = s1_precomputed.get("first_word1", "")
         ngram_name1 = s1_precomputed["ngram_name1"]
         tokens_addr1 = s1_precomputed["tokens_addr1"]
         ngram_addr1 = s1_precomputed["ngram_addr1"]
@@ -82,7 +85,9 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
     else:
         name1 = clean_text(s1_rec.get("name", ""))
         addr1 = clean_text(s1_rec.get("address", ""))
-        tokens_name1 = set(name1.split())
+        words1 = name1.split()
+        tokens_name1 = set(words1)
+        first_word1 = words1[0] if words1 else ""
         ngram_name1 = char_ngrams(name1, n=3)
         tokens_addr1 = set(addr1.split())
         ngram_addr1 = char_ngrams(addr1, n=3)
@@ -93,9 +98,11 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
 
     name2 = clean_text(cand_rec.get("name", ""))
     addr2 = clean_text(cand_rec.get("address", ""))
+    words2 = name2.split()
+    first_word2 = words2[0] if words2 else ""
     
     # 1. Name Features
-    tokens_name2 = set(name2.split())
+    tokens_name2 = set(words2)
     name_jaccard = jaccard_similarity(tokens_name1, tokens_name2)
     
     ngram_name2 = char_ngrams(name2, n=3)
@@ -103,6 +110,11 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
     
     name_ratio = string_ratio(name1, name2)
     name_sort_ratio = token_sort_ratio(name1, name2)
+    
+    name_exact = 1.0 if (name1 and name1 == name2) else 0.0
+    min_name_len = min(len(tokens_name1), len(tokens_name2))
+    name_containment = len(tokens_name1 & tokens_name2) / min_name_len if min_name_len > 0 else 0.0
+    first_word_match = 1.0 if (first_word1 and first_word2 and first_word1 == first_word2) else 0.0
     
     # 2. Address Features
     tokens_addr2 = set(addr2.split())
@@ -112,6 +124,11 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
     addr_char_jaccard = jaccard_similarity(ngram_addr1, ngram_addr2)
     
     addr_sort_ratio = token_sort_ratio(addr1, addr2)
+    min_addr_len = min(len(tokens_addr1), len(tokens_addr2))
+    addr_containment = len(tokens_addr1 & tokens_addr2) / min_addr_len if min_addr_len > 0 else 0.0
+    
+    # Joint Interaction
+    both_match_score = name_jaccard * addr_jaccard
     
     # 3. House Number Match
     house2 = extract_house_numbers(cand_rec.get("address", ""))
@@ -141,9 +158,14 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
         "name_char_jaccard": name_char_jaccard,
         "name_ratio": name_ratio,
         "name_sort_ratio": name_sort_ratio,
+        "name_exact": name_exact,
+        "name_containment": name_containment,
+        "first_word_match": first_word_match,
         "addr_jaccard": addr_jaccard,
         "addr_char_jaccard": addr_char_jaccard,
         "addr_sort_ratio": addr_sort_ratio,
+        "addr_containment": addr_containment,
+        "both_match_score": both_match_score,
         "house_num_match": house_num_match,
         "phone_match": phone_match,
         "email_match": email_match,
