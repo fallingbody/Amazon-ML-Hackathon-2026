@@ -218,21 +218,21 @@ pip install -r code/requirements.txt
 ### Running Pipeline on Train Split (Validation Mode)
 ```bash
 # Runs candidate extraction, feature computation, and model training
-python3 code/main.py --sample-size 50000 --max-candidates 30 --split train
+python3 code/src/main.py --sample-size 50000 --max-candidates 30 --split train
 ```
-*Features are automatically cached to `output/cache_features_train_50000_30.pkl` for instant re-runs.*
+*Features are automatically cached to `output/train/cache_features_train_50000_30.pkl` for instant re-runs.*
 
 ### Running Pipeline on Test Split (Official Leaderboard Mode)
 ```bash
-python3 code/main.py --sample-size 0 --max-candidates 30 --split test
+python3 code/src/main.py --split test --max-candidates 30
 ```
 
 ### Packaging Final Submission Archive
 Per challenge guidelines, prepare the final zip submission package:
 ```bash
 zip -r Antigravity_submission.zip \
-    output/matching_results.tsv \
-    output/candidate_pairs.tsv \
+    output/test/matching_results.tsv \
+    output/test/candidate_pairs.tsv \
     code/ \
     Documentation_template.md
 ```

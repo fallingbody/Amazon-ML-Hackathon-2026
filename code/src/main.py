@@ -14,14 +14,26 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
 
-# Ensure current directory is in python path for module imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Ensure src and parent directories are in python path for flexible execution
+src_dir = os.path.dirname(os.path.abspath(__file__))
+code_dir = os.path.dirname(src_dir)
+root_dir = os.path.dirname(code_dir)
+for p in [src_dir, code_dir, root_dir]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-from src.preprocessing import clean_text
-from src.indexing import CandidateIndexer
-from src.features import compute_pair_features, precompute_s1_features
-from src.model import EntityResolutionModel
-from src.submission import save_candidate_pairs, save_matching_results, validate_outputs
+try:
+    from preprocessing import clean_text
+    from indexing import CandidateIndexer
+    from features import compute_pair_features, precompute_s1_features
+    from model import EntityResolutionModel
+    from submission import save_candidate_pairs, save_matching_results, validate_outputs
+except (ImportError, ValueError):
+    from src.preprocessing import clean_text
+    from src.indexing import CandidateIndexer
+    from src.features import compute_pair_features, precompute_s1_features
+    from src.model import EntityResolutionModel
+    from src.submission import save_candidate_pairs, save_matching_results, validate_outputs
 
 def find_dataset_base() -> str:
     """Dynamically resolves dataset folder location across local, SageMaker, and Colab environments."""

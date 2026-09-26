@@ -66,6 +66,8 @@ def validate_outputs(
             test_dir = "dataset/test"
 
     possible_scripts = [
+        "code/src/validate_submission.py",
+        "src/validate_submission.py",
         "code/validate_submission.py",
         "validate_submission.py",
         "6ab10eb3b23ba_student_resource/student_resource/utils/validate_submission.py",

@@ -100,15 +100,16 @@ The solution demonstrates that entity resolution across 10+ million records can 
 ### A. Code Artefacts & Structure
 ```text
 code/
-├── main.py                 # Master pipeline entry point
-├── requirements.txt        # Pinned dependencies
-├── README.md               # End-to-end execution guide
-└── src/
-    ├── preprocessing.py    # Text normalization, legal suffix regex, token extraction
-    ├── indexing.py         # SQLite disk index & lexical candidate re-ranking
-    ├── features.py         # Pairwise similarity feature extraction (17 features)
-    ├── model.py            # LightGBM classifier & Macro F0.5 threshold optimizer
-    └── submission.py       # TSV file generation & validator interface
+├── src/
+│   ├── main.py                 # Master pipeline entry point
+│   ├── preprocessing.py        # Text normalization, legal suffix regex, token extraction
+│   ├── indexing.py             # Balanced S2/S3 SQLite disk index & lexical candidate re-ranking
+│   ├── features.py             # Pairwise similarity feature extraction (25 features)
+│   ├── model.py                # LightGBM classifier & Macro F0.5 threshold optimizer
+│   ├── submission.py           # TSV file generation & validator interface
+│   └── validate_submission.py  # Official competition submission validator
+├── requirements.txt            # Pinned dependencies / environment
+└── README.md                   # End-to-end execution guide
 ```
 
 ### B. Reproduction Commands
@@ -116,12 +117,15 @@ code/
 # Activate virtual environment
 source .venv/bin/activate
 
-# Execute full pipeline
-python3 code/main.py --sample-size 50000 --max-candidates 30 --split train
+# Execute full pipeline (Train mode)
+python3 code/src/main.py --sample-size 50000 --max-candidates 30 --split train
+
+# Execute full pipeline (Test inference mode)
+python3 code/src/main.py --split test --max-candidates 30
 
 # Validate submission format
-python3 6ab10eb3b23ba_student_resource/student_resource/utils/validate_submission.py \
-    --matching output/matching_results.tsv \
-    --candidate output/candidate_pairs.tsv \
+python3 code/src/validate_submission.py \
+    --matching output/test/matching_results.tsv \
+    --candidate output/test/candidate_pairs.tsv \
     --test-dir 6ab10eb3b23ba_student_resource/student_resource/dataset/test
 ```
