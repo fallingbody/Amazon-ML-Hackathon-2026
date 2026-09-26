@@ -9,8 +9,9 @@ __pycache__/
 venv/
 env/
 
-# Jupyter Notebook Checkpoints
+# Jupyter Notebooks & Checkpoints
 .ipynb_checkpoints
+*.ipynb
 
 # Large Competition Datasets & Student Resource Folders
 *.zip
