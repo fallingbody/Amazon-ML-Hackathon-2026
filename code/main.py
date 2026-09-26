@@ -116,6 +116,7 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
     # 3. Initialize Zero-RAM SQLite Indexer
     print(f"\n[2/5] Initializing Zero-RAM SQLite Disk Index ({split.upper()} set)...", flush=True)
     indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base)
+    indexer.load_records_dict()
 
     print(f"\nQuerying SQLite B-Tree index and building feature vectors (max_candidates={max_candidates})...", flush=True)
     all_candidate_pairs = []
@@ -141,9 +142,8 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         if not cand_ids:
             continue
 
-        # Fetch candidate attribute details
-        df_cands = indexer.fetch_records_by_ids(cand_ids, split=split)
-        cand_records = df_cands.to_dict("records")
+        # Fetch candidate attribute details in O(1) time
+        cand_records = indexer.fetch_records_by_ids(cand_ids, split=split)
 
         s1_gt_targets = gt_map.get(s1_id, set())
 
