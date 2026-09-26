@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.preprocessing import clean_text
 from src.indexing import CandidateIndexer
-from src.features import compute_pair_features
+from src.features import compute_pair_features, precompute_s1_features
 from src.model import EntityResolutionModel
 from src.submission import save_candidate_pairs, save_matching_results, validate_outputs
 
@@ -150,12 +150,15 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
 
         s1_gt_targets = gt_map.get(s1_id, set())
 
+        # Precompute string operations for S1 once, instead of 30 times for each candidate
+        s1_precomputed = precompute_s1_features(s1_rec)
+
         for cand_rec in cand_records:
             cand_id = str(cand_rec["record_id"])
             all_candidate_pairs.append((s1_id, cand_id))
             
-            # Extract features
-            feats = compute_pair_features(s1_rec, cand_rec)
+            # Extract features (uses precomputed S1 to skip redundant regex processing)
+            feats = compute_pair_features(s1_rec, cand_rec, s1_precomputed)
             features_list.append(feats)
             
             # Ground truth label (1 if candidate in ground truth, else 0)
