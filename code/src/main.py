@@ -424,6 +424,19 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
             print(f"  Pairwise F0.5          : {pairwise_f05:.4f}", flush=True)
             print(f"  Competition Macro F0.5 : {competition_macro_f05:.4f}  [LEADERBOARD METRIC]", flush=True)
             print("=" * 55 + "\n", flush=True)
+
+            model.val_metrics = {
+                "tn": int(tn),
+                "fp": int(fp),
+                "fn": int(fn),
+                "tp": int(tp),
+                "prec": float(prec),
+                "rec": float(rec),
+                "f1": float(pairwise_f1),
+                "f05": float(pairwise_f05),
+                "macro_f05": float(competition_macro_f05),
+                "threshold": float(model.optimal_threshold)
+            }
         else:
             model.train(X_df, y_arr)
         

@@ -147,21 +147,27 @@ class EntityResolutionModel:
         return float(best_thresh)
 
     def save(self, filepath: str):
-        """Saves trained model and threshold to disk."""
+        """Saves trained model, threshold, and validation metrics to disk."""
         dirname = os.path.dirname(filepath)
         if dirname:
             os.makedirs(dirname, exist_ok=True)
+        save_dict = {
+            "clf": self.clf,
+            "optimal_threshold": self.optimal_threshold,
+            "val_metrics": getattr(self, "val_metrics", {})
+        }
         with open(filepath, "wb") as f:
-            pickle.dump({"clf": self.clf, "optimal_threshold": self.optimal_threshold}, f)
+            pickle.dump(save_dict, f)
         print(f"Model successfully saved to {filepath}", flush=True)
 
     @classmethod
     def load(cls, filepath: str):
-        """Loads trained model and threshold from disk."""
+        """Loads trained model, threshold, and metrics from disk."""
         with open(filepath, "rb") as f:
             data = pickle.load(f)
         model = cls()
         model.clf = data["clf"]
         model.optimal_threshold = data["optimal_threshold"]
+        model.val_metrics = data.get("val_metrics", {})
         print(f"Loaded trained model from {filepath} (optimal_threshold={model.optimal_threshold:.3f})", flush=True)
         return model
