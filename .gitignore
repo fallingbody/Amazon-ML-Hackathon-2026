@@ -1,0 +1,43 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints
+
+# Large Competition Datasets & Archives
+*.zip
+*.tar.gz
+*.7z
+*.db
+*.sqlite
+*.sqlite3
+
+# Student Resource Datasets & Index DB
+6ab10eb3b23ba_student_resource.zip
+6ab10eb3b23ba_student_resource/student_resource/dataset/
+6ab10eb3b23ba_student_resource/student_resource/index.db
+6ab10eb3b23ba_student_resource/**/*.tsv
+6ab10eb3b23ba_student_resource/**/*.csv
+6ab10eb3b23ba_student_resource/**/*.db
+
+# Generated Output TSVs
+output/*.tsv
+
+# System & OS Files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# IDEs & Antigravity Configs
+.vscode/
+.idea/
+.gemini/
