@@ -205,14 +205,13 @@ class CandidateIndexer:
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        placeholders = ",".join(["?"] * len(tokens))
-        query = f"SELECT {self._id_col} FROM token_index WHERE token IN ({placeholders}) LIMIT 5000"
-        cursor.execute(query, tokens)
-        rows = cursor.fetchall()
-
         candidate_counts = {}
-        for (rec_id,) in rows:
-            candidate_counts[rec_id] = candidate_counts.get(rec_id, 0) + 1
+        # Query each token individually with a strict limit to guarantee we don't miss rare tokens
+        # while preventing any single common token from causing thousands of disk reads.
+        for token in tokens:
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 200", (token,))
+            for (rec_id,) in cursor.fetchall():
+                candidate_counts[rec_id] = candidate_counts.get(rec_id, 0) + 1
 
         # Sort candidates by number of matching tokens in descending order
         sorted_candidates = sorted(candidate_counts.items(), key=lambda x: x[1], reverse=True)
