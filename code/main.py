@@ -21,8 +21,35 @@ from src.features import compute_pair_features
 from src.model import EntityResolutionModel
 from src.submission import save_candidate_pairs, save_matching_results, validate_outputs
 
-DATASET_BASE = "6ab10eb3b23ba_student_resource/student_resource/dataset"
-DB_PATH = "6ab10eb3b23ba_student_resource/student_resource/index.db"
+def find_dataset_base() -> str:
+    """Dynamically resolves dataset folder location across local and Colab environments."""
+    possible_paths = [
+        "6ab10eb3b23ba_student_resource/student_resource/dataset",
+        "student_resource/dataset",
+        "dataset",
+        "../6ab10eb3b23ba_student_resource/student_resource/dataset",
+        "/content/6ab10eb3b23ba_student_resource/student_resource/dataset",
+        "/content/dataset"
+    ]
+    for p in possible_paths:
+        if os.path.exists(p):
+            return p
+    return possible_paths[0]
+
+def find_db_path() -> str:
+    """Dynamically resolves SQLite index.db location across local and Colab environments."""
+    possible_paths = [
+        "6ab10eb3b23ba_student_resource/student_resource/index.db",
+        "student_resource/index.db",
+        "index.db",
+        "../6ab10eb3b23ba_student_resource/student_resource/index.db",
+        "/content/6ab10eb3b23ba_student_resource/student_resource/index.db",
+        "/content/index.db"
+    ]
+    for p in possible_paths:
+        if os.path.exists(p):
+            return p
+    return possible_paths[0]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Business Entity Resolution Pipeline")
@@ -32,17 +59,24 @@ def parse_args():
     return parser.parse_args()
 
 def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str = "train"):
+    dataset_base = find_dataset_base()
+    db_path = find_db_path()
+
     print("=" * 70, flush=True)
     print(f"   BUSINESS ENTITY RESOLUTION PIPELINE ({split.upper()} SET)   ", flush=True)
     print("=" * 70, flush=True)
-    
-    split_dir = os.path.join(DATASET_BASE, split)
+    print(f"Dataset Location: {dataset_base}", flush=True)
+    print(f"SQLite Index DB:  {db_path}", flush=True)
+
+    split_dir = os.path.join(dataset_base, split)
     s1_filename = f"{split}_source1.tsv"
     s1_path = os.path.join(split_dir, s1_filename)
-    gt_path = os.path.join(DATASET_BASE, "train", "train_ground_truth.tsv")
+    gt_path = os.path.join(dataset_base, "train", "train_ground_truth.tsv")
     
     if not os.path.exists(s1_path):
-        print(f"Error: Dataset file not found at {s1_path}", flush=True)
+        print(f"\nError: Dataset file not found at {s1_path}", flush=True)
+        print("Searched locations:")
+        print(f"  - {s1_path}")
         return
 
     # 1. Load Source 1 Sample
@@ -79,9 +113,9 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         }
         print(f"Loaded Ground Truth mapping for {len(gt_map):,} entities.", flush=True)
 
-    # 3. Initialize Zero-RAM Candidate Indexer
+    # 3. Initialize Zero-RAM SQLite Indexer
     print(f"\n[2/5] Initializing Zero-RAM SQLite Disk Index ({split.upper()} set)...", flush=True)
-    indexer = CandidateIndexer(db_path=DB_PATH, dataset_base=DATASET_BASE)
+    indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base)
 
     print(f"\nQuerying SQLite B-Tree index and building feature vectors (max_candidates={max_candidates})...", flush=True)
     all_candidate_pairs = []

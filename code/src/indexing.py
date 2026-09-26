@@ -8,15 +8,44 @@ import pandas as pd
 from typing import List, Set, Dict, Any
 from .preprocessing import extract_tokens
 
-DEFAULT_DB_PATH = "6ab10eb3b23ba_student_resource/student_resource/index.db"
-DEFAULT_DATASET_BASE = "6ab10eb3b23ba_student_resource/student_resource/dataset"
+def resolve_db_path(db_path: str = None) -> str:
+    if db_path and os.path.exists(db_path):
+        return db_path
+    possible_paths = [
+        "6ab10eb3b23ba_student_resource/student_resource/index.db",
+        "student_resource/index.db",
+        "index.db",
+        "../6ab10eb3b23ba_student_resource/student_resource/index.db",
+        "/content/6ab10eb3b23ba_student_resource/student_resource/index.db",
+        "/content/index.db"
+    ]
+    for p in possible_paths:
+        if os.path.exists(p):
+            return p
+    return possible_paths[0]
+
+def resolve_dataset_base(dataset_base: str = None) -> str:
+    if dataset_base and os.path.exists(dataset_base):
+        return dataset_base
+    possible_paths = [
+        "6ab10eb3b23ba_student_resource/student_resource/dataset",
+        "student_resource/dataset",
+        "dataset",
+        "../6ab10eb3b23ba_student_resource/student_resource/dataset",
+        "/content/6ab10eb3b23ba_student_resource/student_resource/dataset",
+        "/content/dataset"
+    ]
+    for p in possible_paths:
+        if os.path.exists(p):
+            return p
+    return possible_paths[0]
 
 class CandidateIndexer:
     """Class to interact with SQLite index.db for zero-RAM candidate lookup."""
     
-    def __init__(self, db_path: str = DEFAULT_DB_PATH, dataset_base: str = DEFAULT_DATASET_BASE):
-        self.db_path = db_path
-        self.dataset_base = dataset_base
+    def __init__(self, db_path: str = None, dataset_base: str = None):
+        self.db_path = resolve_db_path(db_path)
+        self.dataset_base = resolve_dataset_base(dataset_base)
         self._ensure_records_table_indexed()
 
     def get_connection(self):
