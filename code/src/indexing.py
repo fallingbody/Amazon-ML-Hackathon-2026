@@ -57,22 +57,23 @@ GENERIC_TOKENS = {
 class CandidateIndexer:
     """Class to interact with SQLite index.db for ultra-fast zero-RAM candidate lookup."""
     
-    def __init__(self, db_path: str = None, dataset_base: str = None, split: str = "train"):
+    def __init__(self, db_path: str = None, dataset_base: str = None, split: str = "train", is_worker: bool = False):
         self.split = split
         self.db_path = resolve_db_path(db_path, split=split)
         self.dataset_base = resolve_dataset_base(dataset_base)
         self._conn = None
-        self._id_col = None
+        self._id_col = "record_id"
         self._records_dict = None
         self._frequent_tokens = None
-        self._ensure_tables_indexed(split=self.split)
+        if not is_worker:
+            self._ensure_tables_indexed(split=self.split)
 
     def get_connection(self):
         if self._conn is None:
             dirname = os.path.dirname(self.db_path)
             if dirname:
                 os.makedirs(dirname, exist_ok=True)
-            self._conn = sqlite3.connect(self.db_path)
+            self._conn = sqlite3.connect(f"file:{self.db_path}?mode=ro" if os.path.exists(self.db_path) else self.db_path, uri=True if os.path.exists(self.db_path) else False)
             cursor = self._conn.cursor()
             cursor.execute("PRAGMA cache_size = -64000")
             cursor.execute("PRAGMA temp_store = MEMORY")
@@ -193,12 +194,14 @@ class CandidateIndexer:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT record_id, name, address, country, dataset FROM records")
-        rows = cursor.fetchall()
-        self._records_dict = {
-            r[0]: (r[1], r[2], r[3], r[4])
-            for r in rows
-        }
-        del rows
+        records_dict = {}
+        while True:
+            rows = cursor.fetchmany(250000)
+            if not rows:
+                break
+            for r in rows:
+                records_dict[r[0]] = (r[1], r[2], r[3], r[4])
+        self._records_dict = records_dict
         print(f"Cached {len(self._records_dict):,} candidate record attributes in compact tuples.", flush=True)
         return self._records_dict
 
@@ -280,11 +283,15 @@ class CandidateIndexer:
                 addr_overlap = len(s1_addr_words & c_addr_words)
                 first_word_bonus = 3 if (s1_first_word and c_name_raw and s1_first_word == c_name_raw[0]) else 0
 
-                # House number bonus or conflict penalty
-                c_house = extract_house_numbers(rec[1])
-                house_bonus = 2 if (s1_house and c_house and s1_house == c_house) else (
-                    -2 if (s1_house and c_house and not (s1_house & c_house)) else 0
-                )
+                # House number bonus or conflict penalty (only if s1 has house numbers)
+                house_bonus = 0
+                if s1_house:
+                    c_house = extract_house_numbers(rec[1])
+                    if c_house:
+                        if s1_house == c_house:
+                            house_bonus = 2
+                        elif not (s1_house & c_house):
+                            house_bonus = -2
 
                 score = name_overlap * 4 + addr_overlap + first_word_bonus + house_bonus
                 scored_candidates.append((cid, score))

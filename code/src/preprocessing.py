@@ -79,8 +79,11 @@ def extract_tokens(name: str, address: str) -> Set[str]:
     tokens = [t for t in full_text.split() if len(t) >= 3 and t not in STOP_WORDS]
     return set(tokens)
 
+RE_DIGITS = re.compile(r"\b\d+\b")
+
 def extract_house_numbers(text: str) -> Set[str]:
     """Extracts numeric building/house numbers from an address string."""
     if not isinstance(text, str) or pd.isna(text):
         return set()
-    return set(re.findall(r"\b\d+\b", text))
+    return set(RE_DIGITS.findall(text))
+

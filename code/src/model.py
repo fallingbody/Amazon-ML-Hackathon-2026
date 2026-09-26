@@ -73,6 +73,8 @@ class EntityResolutionModel:
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         """Returns match probabilities for given feature set."""
+        if hasattr(self.clf, "booster_"):
+            return self.clf.booster_.predict(X, num_threads=1)
         return self.clf.predict_proba(X)[:, 1]
 
     def predict(self, X: pd.DataFrame, threshold: float = None) -> np.ndarray:

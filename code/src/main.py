@@ -6,12 +6,17 @@ Usage:
 """
 import gc
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 import sys
 import time
 import pickle
 import argparse
 import pandas as pd
 import numpy as np
+import multiprocessing as mp
 from typing import Dict, List, Tuple
 
 # Ensure src and parent directories are in python path for flexible execution
@@ -34,6 +39,56 @@ except (ImportError, ValueError):
     from src.features import compute_pair_features, precompute_s1_features
     from src.model import EntityResolutionModel
     from src.submission import save_candidate_pairs, save_matching_results, validate_outputs
+
+# Global worker state for multi-process test streaming
+_WORKER_INDEXER = None
+_WORKER_MODEL = None
+_WORKER_MAX_CANDS = 30
+_GLOBAL_RECORDS_DICT = None
+
+def _init_test_worker(db_path: str, model_path: str, dataset_base: str, max_candidates: int):
+    global _WORKER_INDEXER, _WORKER_MODEL, _WORKER_MAX_CANDS, _GLOBAL_RECORDS_DICT
+    _WORKER_INDEXER = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split="test", is_worker=True)
+    _WORKER_INDEXER._records_dict = _GLOBAL_RECORDS_DICT
+    _WORKER_INDEXER.get_frequent_tokens()
+    _WORKER_MODEL = EntityResolutionModel.load(model_path)
+    _WORKER_MAX_CANDS = max_candidates
+
+def _process_test_chunk(chunk_s1: list) -> tuple:
+    cand_lines = []
+    match_lines = []
+    for s1_rec in chunk_s1:
+        s1_id = str(s1_rec["record_id"])
+        s1_country = str(s1_rec.get("country", "")).strip().lower()
+        cand_ids = list(_WORKER_INDEXER.find_candidates_for_record(
+            name=str(s1_rec.get("name", "")),
+            address=str(s1_rec.get("address", "")),
+            max_candidates=_WORKER_MAX_CANDS,
+            country=s1_country
+        ))
+        cand_lines.append(f"{s1_id}\t{','.join(cand_ids)}\n")
+        if not cand_ids:
+            match_lines.append(f"{s1_id}\t\n")
+            continue
+        cand_records = _WORKER_INDEXER.fetch_records_by_ids(cand_ids, split="test")
+        s1_precomputed = precompute_s1_features(s1_rec)
+        batch_pairs = []
+        batch_features = []
+        for cand_rec in cand_records:
+            cid = str(cand_rec["record_id"])
+            c2_country = str(cand_rec.get("country", "")).strip().lower()
+            if s1_country and c2_country and s1_country != c2_country:
+                continue
+            batch_pairs.append(cid)
+            batch_features.append(compute_pair_features(s1_rec, cand_rec, s1_precomputed))
+        matches = []
+        if batch_features:
+            preds = _WORKER_MODEL.predict(pd.DataFrame(batch_features))
+            for cid, pred in zip(batch_pairs, preds):
+                if pred == 1:
+                    matches.append(cid)
+        match_lines.append(f"{s1_id}\t{','.join(matches)}\n")
+    return cand_lines, match_lines
 
 def find_dataset_base() -> str:
     """Dynamically resolves dataset folder location across local, SageMaker, and Colab environments."""
@@ -76,9 +131,12 @@ def parse_args():
     parser.add_argument("--split", type=str, default="train", choices=["train", "test"], help="Dataset split to run on (train or test)")
     parser.add_argument("--no-cache", action="store_true", help="Disable caching of extracted features")
     parser.add_argument("--db-path", type=str, default=None, help="Explicit path to SQLite index.db (optional)")
+    parser.add_argument("--num-workers", type=int, default=min(8, os.cpu_count() or 4), help="Number of parallel worker processes for test streaming (default: min(8, CPU count))")
     return parser.parse_args()
 
-def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str = "train", no_cache: bool = False, db_path_arg: str = None):
+def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str = "train", no_cache: bool = False, db_path_arg: str = None, num_workers: int = None):
+    if num_workers is None:
+        num_workers = min(8, os.cpu_count() or 4)
     dataset_base = find_dataset_base()
     db_path = find_db_path(split=split, explicit_path=db_path_arg)
 
@@ -116,9 +174,9 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
 
     print(f"Loaded {len(df_s1):,} Source 1 records.", flush=True)
 
-    # 2. Fast Vectorized Ground Truth Mapping Load
+    # 2. Fast Vectorized Ground Truth Mapping Load (only needed for train split)
     gt_map = {}
-    if os.path.exists(gt_path):
+    if split == "train" and os.path.exists(gt_path):
         print("Loading Ground Truth labels (vectorized dictionary build)...", flush=True)
         df_gt = pd.read_csv(gt_path, sep="\t", engine="pyarrow")
         gt_id_col = "source1_entity_id" if "source1_entity_id" in df_gt.columns else df_gt.columns[0]
@@ -172,68 +230,97 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
             f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
             f_match.write("source1_entity_id\tmatched_entity_ids\n")
 
-            batch_size = 500
-            for b_idx in range(0, total_s1, batch_size):
-                b_end = min(b_idx + batch_size, total_s1)
-                batch_s1 = s1_records[b_idx:b_end]
+            if num_workers > 1:
+                global _GLOBAL_RECORDS_DICT
+                _GLOBAL_RECORDS_DICT = indexer._records_dict
+                indexer.close()  # CRITICAL: Close SQLite connection in parent before fork to avoid deadlock in workers
 
-                batch_pairs = []
-                batch_features = []
-                batch_cands = {}
+                chunk_size = 250
+                chunks = [s1_records[i:i + chunk_size] for i in range(0, total_s1, chunk_size)]
+                print(f"Executing with {num_workers} parallel workers across {len(chunks):,} chunks...", flush=True)
 
-                for s1_rec in batch_s1:
-                    s1_id = str(s1_rec["record_id"])
-                    s1_country = str(s1_rec.get("country", "")).strip().lower()
-                    cand_ids = list(indexer.find_candidates_for_record(
-                        name=str(s1_rec.get("name", "")),
-                        address=str(s1_rec.get("address", "")),
-                        max_candidates=max_candidates,
-                        country=s1_country
-                    ))
-                    batch_cands[s1_id] = cand_ids
+                processed_count = 0
+                with mp.Pool(
+                    processes=num_workers,
+                    initializer=_init_test_worker,
+                    initargs=(db_path, model_load_path, dataset_base, max_candidates)
+                ) as pool:
+                    for cand_lines, match_lines in pool.imap(_process_test_chunk, chunks, chunksize=1):
+                        f_cand.writelines(cand_lines)
+                        f_match.writelines(match_lines)
+                        processed_count += len(cand_lines)
 
-                    if not cand_ids:
-                        continue
+                        if processed_count % 1000 == 0 or processed_count == total_s1 or total_s1 <= 2000:
+                            f_cand.flush()
+                            f_match.flush()
+                            elapsed = time.time() - start_time
+                            pct = processed_count / total_s1 * 100
+                            rate = processed_count / elapsed if elapsed > 0 else 0
+                            eta = (total_s1 - processed_count) / rate if rate > 0 else 0
+                            print(f"  [{pct:5.1f}%] Processed {processed_count:,} / {total_s1:,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
+            else:
+                batch_size = 500
+                for b_idx in range(0, total_s1, batch_size):
+                    b_end = min(b_idx + batch_size, total_s1)
+                    batch_s1 = s1_records[b_idx:b_end]
 
-                    cand_records = indexer.fetch_records_by_ids(cand_ids, split="test")
-                    s1_precomputed = precompute_s1_features(s1_rec)
+                    batch_pairs = []
+                    batch_features = []
+                    batch_cands = {}
 
-                    for cand_rec in cand_records:
-                        cid = str(cand_rec["record_id"])
-                        c2_country = str(cand_rec.get("country", "")).strip().lower()
-                        # Open-set country filter: reject impossible cross-country pairs
-                        if s1_country and c2_country and s1_country != c2_country:
+                    for s1_rec in batch_s1:
+                        s1_id = str(s1_rec["record_id"])
+                        s1_country = str(s1_rec.get("country", "")).strip().lower()
+                        cand_ids = list(indexer.find_candidates_for_record(
+                            name=str(s1_rec.get("name", "")),
+                            address=str(s1_rec.get("address", "")),
+                            max_candidates=max_candidates,
+                            country=s1_country
+                        ))
+                        batch_cands[s1_id] = cand_ids
+
+                        if not cand_ids:
                             continue
-                        batch_pairs.append((s1_id, cid))
-                        batch_features.append(compute_pair_features(s1_rec, cand_rec, s1_precomputed))
 
-                # Flush candidate pairs to disk immediately (1 row per S1 entity, comma-separated candidate IDs)
-                for s1_id, cand_ids in batch_cands.items():
-                    f_cand.write(f"{s1_id}\t{','.join(cand_ids)}\n")
+                        cand_records = indexer.fetch_records_by_ids(cand_ids, split="test")
+                        s1_precomputed = precompute_s1_features(s1_rec)
 
-                # Predict matches for this batch
-                batch_matches = {s1_id: [] for s1_id in batch_cands}
-                if batch_features:
-                    X_b = pd.DataFrame(batch_features)
-                    preds = model.predict(X_b)
-                    for (s1_id, cid), pred in zip(batch_pairs, preds):
-                        if pred == 1:
-                            batch_matches[s1_id].append(cid)
+                        for cand_rec in cand_records:
+                            cid = str(cand_rec["record_id"])
+                            c2_country = str(cand_rec.get("country", "")).strip().lower()
+                            # Open-set country filter: reject impossible cross-country pairs
+                            if s1_country and c2_country and s1_country != c2_country:
+                                continue
+                            batch_pairs.append((s1_id, cid))
+                            batch_features.append(compute_pair_features(s1_rec, cand_rec, s1_precomputed))
 
-                # Flush match results to disk immediately
-                for s1_id, matches in batch_matches.items():
-                    f_match.write(f"{s1_id}\t{','.join(matches)}\n")
+                    # Flush candidate pairs to disk immediately (1 row per S1 entity, comma-separated candidate IDs)
+                    for s1_id, cand_ids in batch_cands.items():
+                        f_cand.write(f"{s1_id}\t{','.join(cand_ids)}\n")
 
-                # Progress report
-                elapsed = time.time() - start_time
-                pct = b_end / total_s1 * 100
-                rate = b_end / elapsed if elapsed > 0 else 0
-                eta = (total_s1 - b_end) / rate if rate > 0 else 0
-                print(f"  [{pct:5.1f}%] Processed {b_end:,} / {total_s1:,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
+                    # Predict matches for this batch
+                    batch_matches = {s1_id: [] for s1_id in batch_cands}
+                    if batch_features:
+                        X_b = pd.DataFrame(batch_features)
+                        preds = model.predict(X_b)
+                        for (s1_id, cid), pred in zip(batch_pairs, preds):
+                            if pred == 1:
+                                batch_matches[s1_id].append(cid)
 
-                # Explicit memory release per batch
-                del batch_pairs, batch_features, batch_cands, batch_matches
-                gc.collect()
+                    # Flush match results to disk immediately
+                    for s1_id, matches in batch_matches.items():
+                        f_match.write(f"{s1_id}\t{','.join(matches)}\n")
+
+                    # Progress report
+                    elapsed = time.time() - start_time
+                    pct = b_end / total_s1 * 100
+                    rate = b_end / elapsed if elapsed > 0 else 0
+                    eta = (total_s1 - b_end) / rate if rate > 0 else 0
+                    print(f"  [{pct:5.1f}%] Processed {b_end:,} / {total_s1:,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
+
+                    # Explicit memory release per batch
+                    del batch_pairs, batch_features, batch_cands, batch_matches
+                    gc.collect()
 
         print(f"\n[5/5] Test inference complete! Outputs saved to {cand_out_path} and {match_out_path}.", flush=True)
         print("\nValidating output submission files against official submission validator...", flush=True)
@@ -467,5 +554,6 @@ if __name__ == "__main__":
         max_candidates=args.max_candidates,
         split=args.split,
         no_cache=args.no_cache,
-        db_path_arg=args.db_path
+        db_path_arg=args.db_path,
+        num_workers=args.num_workers
     )
