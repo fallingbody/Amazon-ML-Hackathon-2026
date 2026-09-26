@@ -323,6 +323,15 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
                     gc.collect()
 
         print(f"\n[5/5] Test inference complete! Outputs saved to {cand_out_path} and {match_out_path}.", flush=True)
+        
+        # Free memory before running validator subprocess to prevent OOM
+        del df_s1, s1_records
+        if "chunks" in locals():
+            del chunks
+        global _GLOBAL_RECORDS_DICT
+        _GLOBAL_RECORDS_DICT = None
+        gc.collect()
+
         print("\nValidating output submission files against official submission validator...", flush=True)
         validate_outputs(matching_file=match_out_path, candidate_file=cand_out_path, test_dir=split_dir)
         return
