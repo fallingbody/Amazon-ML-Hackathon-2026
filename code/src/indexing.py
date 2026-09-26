@@ -7,7 +7,7 @@ import os
 import sqlite3
 import pandas as pd
 from typing import List, Set, Dict, Any
-from .preprocessing import extract_tokens, clean_text
+from .preprocessing import extract_tokens, clean_text, extract_house_numbers, STOP_WORDS
 
 def resolve_db_path(db_path: str = None, split: str = "train") -> str:
     if db_path:
@@ -206,27 +206,47 @@ class CandidateIndexer:
         """Returns pre-cached generic tokens appearing in > 25,000 records."""
         return GENERIC_TOKENS
 
-    def find_candidates_for_record(self, name: str, address: str, max_candidates: int = 50) -> Set[str]:
+    def find_candidates_for_record(self, name: str, address: str, max_candidates: int = 50, country: str = None) -> Set[str]:
         """
-        Extracts informative search tokens and retrieves candidates with in-memory lexical re-ranking.
-        Optimized with top 3 informative tokens (limit 150) for 15x faster throughput.
+        Extracts informative search tokens and retrieves candidates with balanced S2/S3 queries
+        and in-memory lexical re-ranking.
         """
-        all_tokens = list(extract_tokens(name, address))
-        if not all_tokens:
+        clean_n = clean_text(name)
+        clean_a = clean_text(address)
+        if not clean_n and not clean_a:
             return set()
 
         freq_tokens = self.get_frequent_tokens()
-        tokens = [t for t in all_tokens if t not in freq_tokens]
-        if not tokens:
-            tokens = all_tokens[:2]
+        name_words = [t for t in clean_n.split() if len(t) >= 3 and t not in freq_tokens and t not in STOP_WORDS]
+        addr_words = [t for t in clean_a.split() if len(t) >= 3 and t not in freq_tokens and t not in STOP_WORDS]
+
+        # Prioritize longest / brand tokens first (longer words are exponentially more unique)
+        name_words.sort(key=len, reverse=True)
+        addr_words.sort(key=len, reverse=True)
+
+        query_tokens = (name_words + addr_words)[:3]
+        if not query_tokens:
+            all_fallback = [t for t in (clean_n + " " + clean_a).split() if len(t) >= 3]
+            query_tokens = sorted(all_fallback, key=len, reverse=True)[:2]
+
+        if not query_tokens:
+            return set()
 
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        # Query top 3 informative tokens with limit 150 each for balanced recall and 15x speedup
+        # Balanced S2 / S3 Candidate Retrieval:
+        # S2 rows have lowest rowids (queried forward LIMIT 75)
+        # S3 rows have highest rowids (queried in reverse ORDER BY rowid DESC LIMIT 75)
+        # Guarantees zero S3 starvation with < 2ms per query
         candidate_pool = set()
-        for token in tokens[:3]:
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 150", (token,))
+        for token in query_tokens:
+            # Source 2
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 75", (token,))
+            for (rec_id,) in cursor.fetchall():
+                candidate_pool.add(rec_id)
+            # Source 3
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 75", (token,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
 
@@ -235,10 +255,11 @@ class CandidateIndexer:
 
         # Fast in-memory lexical re-ranking using compact tuple records dict
         if self._records_dict:
-            s1_clean_name = clean_text(name).split()
-            s1_name_words = set(s1_clean_name)
-            s1_addr_words = set(clean_text(address).split())
-            s1_first_word = s1_clean_name[0] if s1_clean_name else ""
+            s1_name_words = set(clean_n.split())
+            s1_addr_words = set(clean_a.split())
+            s1_first_word = clean_n.split()[0] if clean_n else ""
+            s1_country = str(country).strip().lower() if country else ""
+            s1_house = extract_house_numbers(address)
 
             scored_candidates = []
             for cid in candidate_pool:
@@ -246,15 +267,26 @@ class CandidateIndexer:
                 if not rec:
                     continue
                 # rec is (name, address, country, dataset)
+                c_country = str(rec[2]).strip().lower()
+                # Open-set country filter: reject impossible cross-country pairs immediately
+                if s1_country and c_country and s1_country != c_country:
+                    continue
+
                 c_name_raw = rec[0].lower().split()
                 c_name_words = set(c_name_raw)
                 c_addr_words = set(rec[1].lower().split())
 
                 name_overlap = len(s1_name_words & c_name_words)
                 addr_overlap = len(s1_addr_words & c_addr_words)
-                first_word_bonus = 2 if (s1_first_word and c_name_raw and s1_first_word == c_name_raw[0]) else 0
+                first_word_bonus = 3 if (s1_first_word and c_name_raw and s1_first_word == c_name_raw[0]) else 0
 
-                score = name_overlap * 3 + addr_overlap + first_word_bonus
+                # House number bonus or conflict penalty
+                c_house = extract_house_numbers(rec[1])
+                house_bonus = 2 if (s1_house and c_house and s1_house == c_house) else (
+                    -2 if (s1_house and c_house and not (s1_house & c_house)) else 0
+                )
+
+                score = name_overlap * 4 + addr_overlap + first_word_bonus + house_bonus
                 scored_candidates.append((cid, score))
 
             scored_candidates.sort(key=lambda x: x[1], reverse=True)

@@ -47,40 +47,40 @@ def extract_digits(text: str) -> str:
     return re.sub(r"\D", "", str(text))
 
 def precompute_s1_features(s1_rec: Dict[str, Any]) -> Dict[str, Any]:
-    """Precomputes string tokens and n-grams for S1 record to avoid recalculating it 30 times per candidate."""
+    """Precomputes string tokens and n-grams for S1 record to avoid recalculating it per candidate."""
     name1 = clean_text(s1_rec.get("name", ""))
     addr1 = clean_text(s1_rec.get("address", ""))
     words_name1 = name1.split()
+    words_addr1 = addr1.split()
     
     return {
         "name1": name1,
         "addr1": addr1,
         "tokens_name1": set(words_name1),
         "first_word1": words_name1[0] if words_name1 else "",
+        "last_word1": words_name1[-1] if words_name1 else "",
         "ngram_name1": char_ngrams(name1, n=3),
-        "tokens_addr1": set(addr1.split()),
+        "tokens_addr1": set(words_addr1),
         "ngram_addr1": char_ngrams(addr1, n=3),
         "house1": extract_house_numbers(s1_rec.get("address", "")),
-        "phone1": extract_digits(s1_rec.get("phone", "")),
-        "email1": str(s1_rec.get("email", "")).strip().lower(),
         "c1": str(s1_rec.get("country", "")).strip().lower()
     }
 
 def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_precomputed: Dict[str, Any] = None) -> Dict[str, float]:
     """
-    Computes fine-grained similarity features for a (Source 1, Candidate) pair.
+    Computes fine-grained similarity and conflict features for a (Source 1, Candidate) pair.
+    Engineered for maximum Precision and Macro F0.5 optimization.
     """
     if s1_precomputed:
         name1 = s1_precomputed["name1"]
         addr1 = s1_precomputed["addr1"]
         tokens_name1 = s1_precomputed["tokens_name1"]
         first_word1 = s1_precomputed.get("first_word1", "")
+        last_word1 = s1_precomputed.get("last_word1", "")
         ngram_name1 = s1_precomputed["ngram_name1"]
         tokens_addr1 = s1_precomputed["tokens_addr1"]
         ngram_addr1 = s1_precomputed["ngram_addr1"]
         house1 = s1_precomputed["house1"]
-        phone1 = s1_precomputed["phone1"]
-        email1 = s1_precomputed["email1"]
         c1 = s1_precomputed["c1"]
     else:
         name1 = clean_text(s1_rec.get("name", ""))
@@ -88,68 +88,77 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
         words1 = name1.split()
         tokens_name1 = set(words1)
         first_word1 = words1[0] if words1 else ""
+        last_word1 = words1[-1] if words1 else ""
         ngram_name1 = char_ngrams(name1, n=3)
         tokens_addr1 = set(addr1.split())
         ngram_addr1 = char_ngrams(addr1, n=3)
         house1 = extract_house_numbers(s1_rec.get("address", ""))
-        phone1 = extract_digits(s1_rec.get("phone", ""))
-        email1 = str(s1_rec.get("email", "")).strip().lower()
         c1 = str(s1_rec.get("country", "")).strip().lower()
 
     name2 = clean_text(cand_rec.get("name", ""))
     addr2 = clean_text(cand_rec.get("address", ""))
     words2 = name2.split()
     first_word2 = words2[0] if words2 else ""
+    last_word2 = words2[-1] if words2 else ""
+    tokens_name2 = set(words2)
+    tokens_addr2 = set(addr2.split())
     
     # 1. Name Features
-    tokens_name2 = set(words2)
     name_jaccard = jaccard_similarity(tokens_name1, tokens_name2)
-    
     ngram_name2 = char_ngrams(name2, n=3)
     name_char_jaccard = jaccard_similarity(ngram_name1, ngram_name2)
-    
     name_ratio = string_ratio(name1, name2)
     name_sort_ratio = token_sort_ratio(name1, name2)
-    
     name_exact = 1.0 if (name1 and name1 == name2) else 0.0
-    min_name_len = min(len(tokens_name1), len(tokens_name2))
-    name_containment = len(tokens_name1 & tokens_name2) / min_name_len if min_name_len > 0 else 0.0
+    
+    # Asymmetric word containment and length ratios
+    len_name1 = len(tokens_name1)
+    len_name2 = len(tokens_name2)
+    overlap_name = len(tokens_name1 & tokens_name2)
+    min_name_len = min(len_name1, len_name2)
+    max_name_len = max(len_name1, len_name2)
+    name_containment = overlap_name / min_name_len if min_name_len > 0 else 0.0
+    name_s1_in_cand = overlap_name / len_name1 if len_name1 > 0 else 0.0
+    name_cand_in_s1 = overlap_name / len_name2 if len_name2 > 0 else 0.0
+    name_len_diff = float(abs(len_name1 - len_name2))
+    name_len_ratio = float(min_name_len / max_name_len) if max_name_len > 0 else 0.0
+
     first_word_match = 1.0 if (first_word1 and first_word2 and first_word1 == first_word2) else 0.0
+    last_word_match = 1.0 if (last_word1 and last_word2 and last_word1 == last_word2) else 0.0
     
     # 2. Address Features
-    tokens_addr2 = set(addr2.split())
     addr_jaccard = jaccard_similarity(tokens_addr1, tokens_addr2)
-    
     ngram_addr2 = char_ngrams(addr2, n=3)
     addr_char_jaccard = jaccard_similarity(ngram_addr1, ngram_addr2)
-    
     addr_sort_ratio = token_sort_ratio(addr1, addr2)
-    min_addr_len = min(len(tokens_addr1), len(tokens_addr2))
-    addr_containment = len(tokens_addr1 & tokens_addr2) / min_addr_len if min_addr_len > 0 else 0.0
+    addr_exact = 1.0 if (addr1 and addr1 == addr2) else 0.0
     
+    len_addr1 = len(tokens_addr1)
+    len_addr2 = len(tokens_addr2)
+    overlap_addr = len(tokens_addr1 & tokens_addr2)
+    min_addr_len = min(len_addr1, len_addr2)
+    addr_containment = overlap_addr / min_addr_len if min_addr_len > 0 else 0.0
+    addr_s1_in_cand = overlap_addr / len_addr1 if len_addr1 > 0 else 0.0
+    addr_cand_in_s1 = overlap_addr / len_addr2 if len_addr2 > 0 else 0.0
+
     # Joint Interaction
     both_match_score = name_jaccard * addr_jaccard
+    both_exact = 1.0 if (name_exact == 1.0 and addr_exact == 1.0) else 0.0
     
-    # 3. House Number Match
+    # 3. House Number Signals (Match & Conflict False-Positive Killer)
     house2 = extract_house_numbers(cand_rec.get("address", ""))
     if house1 and house2:
         house_num_match = 1.0 if house1 == house2 else (0.5 if (house1 & house2) else 0.0)
+        house_num_conflict = 1.0 if not (house1 & house2) else 0.0
     else:
         house_num_match = 0.0
+        house_num_conflict = 0.0
         
-    # 4. Phone Match
-    phone2 = extract_digits(cand_rec.get("phone", ""))
-    phone_match = 1.0 if (phone1 and phone2 and phone1 == phone2) else 0.0
-    
-    # 5. Email Match
-    email2 = str(cand_rec.get("email", "")).strip().lower()
-    email_match = 1.0 if (email1 and email2 and email1 == email2 and "@" in email1) else 0.0
-    
-    # 6. Country Match (Open-set compliant)
+    # 4. Country Match (Open-set compliant)
     c2 = str(cand_rec.get("country", "")).strip().lower()
     country_match = 1.0 if (c1 and c2 and c1 == c2) else 0.0
     
-    # 7. Dataset Source
+    # 5. Dataset Source
     dataset = str(cand_rec.get("dataset", "")).strip().lower()
     is_s2 = 1.0 if "source2" in dataset or "s2" in dataset else 0.0
     
@@ -160,15 +169,24 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
         "name_sort_ratio": name_sort_ratio,
         "name_exact": name_exact,
         "name_containment": name_containment,
+        "name_s1_in_cand": name_s1_in_cand,
+        "name_cand_in_s1": name_cand_in_s1,
+        "name_len_diff": name_len_diff,
+        "name_len_ratio": name_len_ratio,
         "first_word_match": first_word_match,
+        "last_word_match": last_word_match,
         "addr_jaccard": addr_jaccard,
         "addr_char_jaccard": addr_char_jaccard,
         "addr_sort_ratio": addr_sort_ratio,
         "addr_containment": addr_containment,
+        "addr_s1_in_cand": addr_s1_in_cand,
+        "addr_cand_in_s1": addr_cand_in_s1,
+        "addr_exact": addr_exact,
         "both_match_score": both_match_score,
+        "both_exact": both_exact,
         "house_num_match": house_num_match,
-        "phone_match": phone_match,
-        "email_match": email_match,
+        "house_num_conflict": house_num_conflict,
         "country_match": country_match,
         "is_s2": is_s2
     }
+

@@ -20,15 +20,17 @@ def calculate_f_beta(precision: float, recall: float, beta: float = 0.5) -> floa
 class EntityResolutionModel:
     """LightGBM model wrapper for Business Entity Resolution pair matching."""
     
-    def __init__(self, n_estimators: int = 200, learning_rate: float = 0.05, use_gpu: bool = False):
+    def __init__(self, n_estimators: int = 300, learning_rate: float = 0.05, use_gpu: bool = False):
         self.params = {
             "objective": "binary",
             "metric": "binary_logloss",
             "boosting_type": "gbdt",
             "n_estimators": n_estimators,
             "learning_rate": learning_rate,
-            "max_depth": 6,
-            "num_leaves": 31,
+            "max_depth": 8,
+            "num_leaves": 63,
+            "colsample_bytree": 0.8,
+            "subsample": 0.8,
             "verbose": -1,
             "n_jobs": -1
         }
@@ -80,13 +82,13 @@ class EntityResolutionModel:
         return (probs >= thresh).astype(int)
 
     def optimize_f05_threshold(self, y_true: np.ndarray, probs: np.ndarray, groups: np.ndarray = None) -> float:
-        """Finds the probability threshold that maximizes Macro F0.5 score (Competition Metric)."""
+        """Finds the probability threshold that maximizes Macro F0.5 score (Official Competition Metric)."""
         best_thresh = 0.5
         best_f05 = 0.0
 
         if groups is None:
             # Fallback to Global (Micro) F0.5 if no groups provided
-            for thresh in np.linspace(0.1, 0.9, 81):
+            for thresh in np.linspace(0.2, 0.85, 131):
                 preds = (probs >= thresh).astype(int)
                 tp = np.sum((preds == 1) & (y_true == 1))
                 fp = np.sum((preds == 1) & (y_true == 0))
@@ -105,7 +107,7 @@ class EntityResolutionModel:
         _, group_idx = np.unique(groups, return_inverse=True)
         n_groups = len(np.unique(group_idx))
 
-        for thresh in np.linspace(0.1, 0.9, 81):
+        for thresh in np.linspace(0.2, 0.85, 131):
             preds = (probs >= thresh).astype(int)
             
             # Boolean masks
@@ -129,7 +131,13 @@ class EntityResolutionModel:
             f_den = 0.25 * precision_g + recall_g
             f05_g = np.divide(1.25 * precision_g * recall_g, f_den, out=np.zeros_like(precision_g), where=f_den!=0)
             
-            # Macro Average
+            # Official Competition Rule for Singletons:
+            # If an entity has 0 true matches (tp_g == 0 and fn_g == 0),
+            # and model correctly predicted 0 matches (fp_g == 0), it receives 1.0!
+            singleton_perfect = (tp_g == 0) & (fp_g == 0) & (fn_g == 0)
+            f05_g[singleton_perfect] = 1.0
+            
+            # Macro Average across all entities
             macro_f05 = np.mean(f05_g)
             
             if macro_f05 > best_f05:

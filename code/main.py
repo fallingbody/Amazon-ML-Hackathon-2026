@@ -167,7 +167,8 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
                     cand_ids = list(indexer.find_candidates_for_record(
                         name=str(s1_rec.get("name", "")),
                         address=str(s1_rec.get("address", "")),
-                        max_candidates=max_candidates
+                        max_candidates=max_candidates,
+                        country=s1_country
                     ))
                     batch_cands[s1_id] = cand_ids
 
@@ -261,10 +262,12 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         
         for idx, s1_rec in enumerate(s1_records):
             s1_id = str(s1_rec["record_id"])
+            s1_country = str(s1_rec.get("country", "")).strip().lower()
             cand_ids = list(indexer.find_candidates_for_record(
                 name=str(s1_rec.get("name", "")),
                 address=str(s1_rec.get("address", "")),
-                max_candidates=max_candidates
+                max_candidates=max_candidates,
+                country=s1_country
             ))
             
             candidates_map[s1_id] = cand_ids
@@ -283,6 +286,11 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
 
             for cand_rec in cand_records:
                 cand_id = str(cand_rec["record_id"])
+                c2_country = str(cand_rec.get("country", "")).strip().lower()
+                # Open-set country filter: reject impossible cross-country pairs
+                if s1_country and c2_country and s1_country != c2_country:
+                    continue
+
                 all_candidate_pairs.append((s1_id, cand_id))
                 
                 # Extract features (uses precomputed S1 to skip redundant regex processing)
@@ -358,22 +366,40 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
 
             prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f05 = (1.25 * prec * rec) / (0.25 * prec + rec) if (0.25 * prec + rec) > 0 else 0.0
-            f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+            pairwise_f05 = (1.25 * prec * rec) / (0.25 * prec + rec) if (0.25 * prec + rec) > 0 else 0.0
+            pairwise_f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+
+            # Entity-Level Macro F0.5 (Official Competition Metric)
+            _, g_idx = np.unique(val_groups, return_inverse=True)
+            n_val_groups = len(np.unique(g_idx))
+            tp_g = np.bincount(g_idx, weights=(val_preds == 1) & (y_val == 1), minlength=n_val_groups)
+            fp_g = np.bincount(g_idx, weights=(val_preds == 1) & (y_val == 0), minlength=n_val_groups)
+            fn_g = np.bincount(g_idx, weights=(val_preds == 0) & (y_val == 1), minlength=n_val_groups)
+            p_den = tp_g + fp_g
+            r_den = tp_g + fn_g
+            prec_g = np.divide(tp_g, p_den, out=np.zeros_like(tp_g, dtype=float), where=p_den != 0)
+            rec_g = np.divide(tp_g, r_den, out=np.zeros_like(tp_g, dtype=float), where=r_den != 0)
+            f_den = 0.25 * prec_g + rec_g
+            f05_g = np.divide(1.25 * prec_g * rec_g, f_den, out=np.zeros_like(prec_g), where=f_den != 0)
+            f05_g[(tp_g == 0) & (fp_g == 0) & (fn_g == 0)] = 1.0
+            competition_macro_f05 = float(np.mean(f05_g))
 
             print("\n" + "=" * 55, flush=True)
             print("   VALIDATION SET CONFUSION MATRIX & METRICS   ", flush=True)
             print("=" * 55, flush=True)
             print(f"  Total Validation Pairs : {len(y_val):,}", flush=True)
+            print(f"  Unique S1 Val Entities : {n_val_groups:,}", flush=True)
+            print(f"  Optimal Threshold      : {model.optimal_threshold:.3f}", flush=True)
             print(f"  True Positives  (TP)   : {tp:,}  (Correct matches)", flush=True)
             print(f"  False Positives (FP)   : {fp:,}  (Incorrect predictions)", flush=True)
             print(f"  False Negatives (FN)   : {fn:,}  (Missed true matches)", flush=True)
             print(f"  True Negatives  (TN)   : {tn:,}  (Correct non-matches)", flush=True)
             print("-" * 55, flush=True)
-            print(f"  Validation Precision   : {prec * 100:.2f}%", flush=True)
-            print(f"  Validation Recall      : {rec * 100:.2f}%", flush=True)
-            print(f"  Validation F1-Score    : {f1:.4f}", flush=True)
-            print(f"  Validation Macro F0.5  : {f05:.4f}", flush=True)
+            print(f"  Pairwise Precision     : {prec * 100:.2f}%", flush=True)
+            print(f"  Pairwise Recall        : {rec * 100:.2f}%", flush=True)
+            print(f"  Pairwise F1-Score      : {pairwise_f1:.4f}", flush=True)
+            print(f"  Pairwise F0.5          : {pairwise_f05:.4f}", flush=True)
+            print(f"  Competition Macro F0.5 : {competition_macro_f05:.4f}  [LEADERBOARD METRIC]", flush=True)
             print("=" * 55 + "\n", flush=True)
         else:
             model.train(X_df, y_arr)
