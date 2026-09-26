@@ -75,7 +75,6 @@ class CandidateIndexer:
             self._conn = sqlite3.connect(self.db_path)
             cursor = self._conn.cursor()
             cursor.execute("PRAGMA cache_size = -64000")
-            cursor.execute("PRAGMA mmap_size = 3000000000")
             cursor.execute("PRAGMA temp_store = MEMORY")
             cursor.close()
         return self._conn
