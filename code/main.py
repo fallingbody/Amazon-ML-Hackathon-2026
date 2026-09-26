@@ -6,6 +6,7 @@ Usage:
 """
 import os
 import sys
+import time
 import argparse
 import pandas as pd
 import numpy as np
@@ -31,9 +32,9 @@ def parse_args():
     return parser.parse_args()
 
 def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str = "train"):
-    print("=" * 70)
-    print(f"   BUSINESS ENTITY RESOLUTION PIPELINE ({split.upper()} SET)   ")
-    print("=" * 70)
+    print("=" * 70, flush=True)
+    print(f"   BUSINESS ENTITY RESOLUTION PIPELINE ({split.upper()} SET)   ", flush=True)
+    print("=" * 70, flush=True)
     
     split_dir = os.path.join(DATASET_BASE, split)
     s1_filename = f"{split}_source1.tsv"
@@ -41,9 +42,11 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
     gt_path = os.path.join(DATASET_BASE, "train", "train_ground_truth.tsv")
     
     if not os.path.exists(s1_path):
-        print(f"Error: Dataset file not found at {s1_path}")
+        print(f"Error: Dataset file not found at {s1_path}", flush=True)
         return
 
+    # 1. Load Source 1 Sample
+    print(f"\n[1/5] Loading Source 1 records from {s1_path} (limit={sample_size:,})...", flush=True)
     if sample_size and sample_size > 0:
         df_s1 = pd.read_csv(s1_path, sep="\t", nrows=sample_size)
     else:
@@ -57,29 +60,30 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
     if rename_dict:
         df_s1 = df_s1.rename(columns=rename_dict)
 
-    print(f"Loaded {len(df_s1):,} Source 1 records.")
+    print(f"Loaded {len(df_s1):,} Source 1 records.", flush=True)
 
-    # 2. Load Ground Truth Mapping if Available
+    # 2. Fast Vectorized Ground Truth Mapping Load
     gt_map = {}
     if os.path.exists(gt_path):
-        print("Loading Ground Truth labels for training & validation...")
+        print("Loading Ground Truth labels (vectorized dictionary build)...", flush=True)
         df_gt = pd.read_csv(gt_path, sep="\t", engine="pyarrow")
         gt_id_col = "source1_entity_id" if "source1_entity_id" in df_gt.columns else df_gt.columns[0]
         gt_match_col = "matched_entity_ids" if "matched_entity_ids" in df_gt.columns else df_gt.columns[1]
         
-        for _, row in df_gt.iterrows():
-            s1_id = str(row[gt_id_col])
-            tgt_str = str(row[gt_match_col]) if not pd.isna(row[gt_match_col]) else ""
-            if tgt_str:
-                targets = set(tgt_str.split(","))
-            else:
-                targets = set()
-            gt_map[s1_id] = targets
+        gt_ids = df_gt[gt_id_col].astype(str).values
+        gt_matches = df_gt[gt_match_col].fillna("").astype(str).values
+        
+        gt_map = {
+            s1_id: set(m.split(",")) if m else set()
+            for s1_id, m in zip(gt_ids, gt_matches)
+        }
+        print(f"Loaded Ground Truth mapping for {len(gt_map):,} entities.", flush=True)
 
-    # 3. Candidate Retrieval using SQLite Index
-    print(f"\n[2/5] Querying SQLite B-Tree index (max_candidates={max_candidates})...")
-    indexer = CandidateIndexer(db_path=DB_PATH)
-    
+    # 3. Initialize Zero-RAM Candidate Indexer
+    print(f"\n[2/5] Initializing Zero-RAM SQLite Disk Index ({split.upper()} set)...", flush=True)
+    indexer = CandidateIndexer(db_path=DB_PATH, dataset_base=DATASET_BASE)
+
+    print(f"\nQuerying SQLite B-Tree index and building feature vectors (max_candidates={max_candidates})...", flush=True)
     all_candidate_pairs = []
     candidates_map = {}
     results_map = {}
@@ -87,6 +91,7 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
     labels_list = []
 
     s1_records = df_s1.to_dict("records")
+    start_time = time.time()
     
     for idx, s1_rec in enumerate(s1_records):
         s1_id = str(s1_rec["record_id"])
@@ -120,15 +125,20 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
             is_match = 1 if cand_id in s1_gt_targets else 0
             labels_list.append(is_match)
 
-        if (idx + 1) % 10000 == 0 or (idx + 1) == len(s1_records):
-            print(f"Processed {idx + 1:,} / {len(s1_records):,} Source 1 entities...")
+        # Print Percentage Progress every 200 entities with instant flush
+        if (idx + 1) % 200 == 0 or (idx + 1) == len(s1_records):
+            elapsed = time.time() - start_time
+            pct = (idx + 1) / len(s1_records) * 100
+            rate = (idx + 1) / elapsed if elapsed > 0 else 0
+            eta = (len(s1_records) - (idx + 1)) / rate if rate > 0 else 0
+            print(f"  [{pct:5.1f}%] Processed {idx + 1:,} / {len(s1_records):,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
 
     # 4. Train LightGBM Model & Predict
-    print(f"\n[3/5] Extracted features for {len(features_list):,} candidate pairs.")
+    print(f"\n[3/5] Extracted features for {len(features_list):,} candidate pairs.", flush=True)
     X_df = pd.DataFrame(features_list)
     y_arr = np.array(labels_list)
 
-    print("\n[4/5] Training LightGBM Classifier & Tuning Macro F0.5 Threshold...")
+    print("\n[4/5] Training LightGBM Classifier & Tuning Macro F0.5 Threshold...", flush=True)
     model = EntityResolutionModel()
     
     # Train/Val split if ground truth matches exist
@@ -138,7 +148,7 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         y_train, y_val = y_arr[:split_idx], y_arr[split_idx:]
         
         model.train(X_train, y_train, X_val, y_val)
-        print(f"Optimal Macro F0.5 Threshold: {model.optimal_threshold:.3f}")
+        print(f"Optimal Macro F0.5 Threshold: {model.optimal_threshold:.3f}", flush=True)
     else:
         model.train(X_df, y_arr)
 
@@ -151,11 +161,11 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
             results_map[s1_id].append(cand_id)
 
     # 5. Output Results & Validate Formats using validate_submission.py
-    print("\n[5/5] Saving final matching outputs...")
+    print("\n[5/5] Saving final matching outputs...", flush=True)
     save_candidate_pairs(candidates_map, output_path="output/candidate_pairs.tsv")
     save_matching_results(results_map, output_path="output/matching_results.tsv")
 
-    print("\nValidating output submission files against official submission validator...")
+    print("\nValidating output submission files against official submission validator...", flush=True)
     validate_outputs(matching_file="output/matching_results.tsv", candidate_file="output/candidate_pairs.tsv", test_dir=split_dir)
 
 if __name__ == "__main__":
