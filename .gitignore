@@ -12,21 +12,15 @@ env/
 # Jupyter Notebook Checkpoints
 .ipynb_checkpoints
 
-# Large Competition Datasets & Archives
+# Large Competition Datasets & Student Resource Folders
 *.zip
 *.tar.gz
 *.7z
 *.db
 *.sqlite
 *.sqlite3
-
-# Student Resource Datasets & Index DB
+6ab10eb3b23ba_student_resource/
 6ab10eb3b23ba_student_resource.zip
-6ab10eb3b23ba_student_resource/student_resource/dataset/
-6ab10eb3b23ba_student_resource/student_resource/index.db
-6ab10eb3b23ba_student_resource/**/*.tsv
-6ab10eb3b23ba_student_resource/**/*.csv
-6ab10eb3b23ba_student_resource/**/*.db
 
 # Generated Output TSVs
 output/*.tsv
