@@ -149,8 +149,8 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         start_time = time.time()
 
         with open(cand_out_path, "w") as f_cand, open(match_out_path, "w") as f_match:
-            f_cand.write("source1_id\tcandidate_id\n")
-            f_match.write("source1_id\tmatched_entity_ids\n")
+            f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
+            f_match.write("source1_entity_id\tmatched_entity_ids\n")
 
             batch_size = 500
             for b_idx in range(0, total_s1, batch_size):
@@ -163,6 +163,7 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
 
                 for s1_rec in batch_s1:
                     s1_id = str(s1_rec["record_id"])
+                    s1_country = str(s1_rec.get("country", "")).strip().lower()
                     cand_ids = list(indexer.find_candidates_for_record(
                         name=str(s1_rec.get("name", "")),
                         address=str(s1_rec.get("address", "")),
@@ -178,13 +179,16 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
 
                     for cand_rec in cand_records:
                         cid = str(cand_rec["record_id"])
+                        c2_country = str(cand_rec.get("country", "")).strip().lower()
+                        # Open-set country filter: reject impossible cross-country pairs
+                        if s1_country and c2_country and s1_country != c2_country:
+                            continue
                         batch_pairs.append((s1_id, cid))
                         batch_features.append(compute_pair_features(s1_rec, cand_rec, s1_precomputed))
 
-                # Flush candidate pairs to disk immediately
+                # Flush candidate pairs to disk immediately (1 row per S1 entity, comma-separated candidate IDs)
                 for s1_id, cand_ids in batch_cands.items():
-                    for cid in cand_ids:
-                        f_cand.write(f"{s1_id}\t{cid}\n")
+                    f_cand.write(f"{s1_id}\t{','.join(cand_ids)}\n")
 
                 # Predict matches for this batch
                 batch_matches = {s1_id: [] for s1_id in batch_cands}

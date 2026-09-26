@@ -22,8 +22,9 @@ env/
 6ab10eb3b23ba_student_resource/
 6ab10eb3b23ba_student_resource.zip
 
-# Generated Output TSVs
-output/*.tsv
+# Generated Output & Model Weights
+output/
+*.pkl
 
 # System & OS Files
 .DS_Store

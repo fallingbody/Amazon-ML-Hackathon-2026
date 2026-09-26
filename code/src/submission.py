@@ -41,14 +41,39 @@ def save_matching_results(results_map: Dict[str, List[str]], output_path: str = 
 def validate_outputs(
     matching_file: str = "output/matching_results.tsv",
     candidate_file: str = "output/candidate_pairs.tsv",
-    test_dir: str = "6ab10eb3b23ba_student_resource/student_resource/dataset/train"
+    test_dir: str = None
 ) -> bool:
     """
     Runs the official competition validator (validate_submission.py) to check TSV outputs.
     """
-    validator_script = "6ab10eb3b23ba_student_resource/student_resource/utils/validate_submission.py"
-    if not os.path.exists(validator_script):
-        print(f"Validator script not found at {validator_script}")
+    if not test_dir or not os.path.exists(test_dir):
+        possible_test_dirs = [
+            "dataset/test",
+            "6ab10eb3b23ba_student_resource/student_resource/dataset/test",
+            "../dataset/test",
+            "data/test"
+        ]
+        for d in possible_test_dirs:
+            if os.path.exists(d):
+                test_dir = d
+                break
+        if not test_dir:
+            test_dir = "dataset/test"
+
+    possible_scripts = [
+        "code/validate_submission.py",
+        "validate_submission.py",
+        "6ab10eb3b23ba_student_resource/student_resource/utils/validate_submission.py",
+        "utils/validate_submission.py"
+    ]
+    validator_script = None
+    for s in possible_scripts:
+        if os.path.exists(s):
+            validator_script = s
+            break
+
+    if not validator_script:
+        print(f"Validator script not found in {possible_scripts}")
         return True
 
     cmd = [
