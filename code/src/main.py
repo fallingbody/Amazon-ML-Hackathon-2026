@@ -46,11 +46,10 @@ _WORKER_INDEXER = None
 _WORKER_MODEL = None
 _WORKER_MAX_CANDS = 30
 
-def _init_test_worker(db_path: str, model_path: str, dataset_base: str, max_candidates: int, records_dict: dict = None):
+def _init_test_worker(db_path: str, model_path: str, dataset_base: str, max_candidates: int):
     global _WORKER_INDEXER, _WORKER_MODEL, _WORKER_MAX_CANDS
     _WORKER_INDEXER = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split="test", is_worker=True)
-    if records_dict is not None:
-        _WORKER_INDEXER._records_dict = records_dict
+    _WORKER_INDEXER._records_dict = None  # Pure Zero-RAM: SQLite in /dev/shm handles memory in C (0 Python refcount leaks)
     _WORKER_INDEXER.get_frequent_tokens()
     _WORKER_MODEL = EntityResolutionModel.load(model_path)
     if hasattr(_WORKER_MODEL, "cb_clf") and _WORKER_MODEL.cb_clf is not None:
@@ -435,11 +434,7 @@ def run_pipeline(
         indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split="test")
         indexer.get_frequent_tokens()
 
-        # Ultra-Fast High-RAM Optimization: Pre-cache 10M record attributes into Python memory (2.5 GB)
-        # Shared across all workers via Copy-On-Write (COW) for nanosecond attribute lookups.
-        records_dict = indexer.load_records_dict()
-
-        print(f"\n[4/5] Streaming predictions directly to disk in batches...", flush=True)
+        print(f"\n[4/5] Streaming predictions directly to disk in batches (RAM < 15 GB)...", flush=True)
         s1_records = df_s1.to_dict("records")
         total_s1 = len(s1_records)
         start_time = time.time()
@@ -451,16 +446,16 @@ def run_pipeline(
             if num_workers > 1:
                 indexer.close()  # CRITICAL: Close SQLite connection in parent before fork to avoid deadlock in workers
 
-                _test_batch_size = 100
+                _test_batch_size = 50
                 _test_chunks = (s1_records[i:i + _test_batch_size] for i in range(0, total_s1, _test_batch_size))
                 _test_num_chunks = (total_s1 + _test_batch_size - 1) // _test_batch_size
-                print(f"Executing with {num_workers} parallel workers across {_test_num_chunks:,} chunks (High-RAM COW Mode)...", flush=True)
+                print(f"Executing with {num_workers} parallel workers across {_test_num_chunks:,} chunks (Stable Zero-RAM Mode)...", flush=True)
 
                 processed_count = 0
                 with mp.Pool(
                     processes=num_workers,
                     initializer=_init_test_worker,
-                    initargs=(db_path, model_load_path, dataset_base, max_candidates, records_dict)
+                    initargs=(db_path, model_load_path, dataset_base, max_candidates)
                 ) as pool:
                     for cand_lines, match_lines in pool.imap(_process_test_chunk, _test_chunks, chunksize=1):
                         f_cand.writelines(cand_lines)
