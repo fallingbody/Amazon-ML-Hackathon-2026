@@ -293,40 +293,40 @@ class CandidateIndexer:
                 pass
 
         # Pass 4: Ultra-fast balanced single-token queries (S2 forward, S3 reverse)
-        for token in sorted(s1_name_words, key=len, reverse=True)[:3]:
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 350", (token,))
+        for token in sorted(s1_name_words, key=len, reverse=True)[:4]:
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 450", (token,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 350", (token,))
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 450", (token,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
 
         # Pass 5: Distinct address tokens (balanced S2/S3)
-        for token in sorted(s1_addr_words, key=len, reverse=True)[:2]:
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 200", (token,))
+        for token in sorted(s1_addr_words, key=len, reverse=True)[:3]:
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 250", (token,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 200", (token,))
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 250", (token,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
 
         # Pass 6: Building / House numbers
         for h in s1_house:
             if len(h) >= 2:
-                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 250", (h,))
+                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 300", (h,))
                 for (rec_id,) in cursor.fetchall():
                     candidate_pool.add(rec_id)
-                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 250", (h,))
+                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 300", (h,))
                 for (rec_id,) in cursor.fetchall():
                     candidate_pool.add(rec_id)
 
         # Pass 7: Postal code
         postal = extract_postal_code(clean_a, country)
         if postal and len(postal) >= 5:
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 250", (postal,))
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 300", (postal,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 250", (postal,))
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 300", (postal,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
 
