@@ -1,6 +1,6 @@
 # Business Entity Resolution — Amazon ML Challenge 2026
 
-An end-to-end Machine Learning solution for cross-source Business Entity Resolution. Matches reference business entities from Source 1 ($S1$) against candidate records in Source 2 ($S2$) and Source 3 ($S3$), optimized for the **Macro $F_{0.5}$** metric under strict memory constraints.
+An end-to-end Machine Learning solution for cross-source Business Entity Resolution. Matches reference business entities from Source 1 ($S1$) against candidate records in Source 2 ($S2$) and Source 3 ($S3$), engineered to maximize the competition **Macro $F_{0.5}$** metric ($\ge 0.9800$ target) under strict memory and computational constraints.
 
 ---
 
@@ -9,51 +9,81 @@ An end-to-end Machine Learning solution for cross-source Business Entity Resolut
 ```text
 code/
 ├── src/
-│   ├── main.py                 # Master pipeline entry point
-│   ├── preprocessing.py        # Text cleaning, legal suffix removal, token extraction
-│   ├── indexing.py             # Balanced S2/S3 SQLite index lookup (Zero-RAM candidate retrieval)
-│   ├── features.py             # Pairwise 25-similarity & conflict feature extraction
-│   ├── model.py                # LightGBM binary classifier & Macro F0.5 threshold optimization
+│   ├── main.py                 # Master pipeline entry point (Train & Zero-RAM Multiprocess Test)
+│   ├── preprocessing.py        # Text cleaning, legal suffix removal, postal code, domain & acronym extractors
+│   ├── indexing.py             # Balanced S2/S3 SQLite index lookup & Zero-RAM candidate re-ranking
+│   ├── features.py             # Pairwise 32-similarity & conflict feature extraction engine
+│   ├── model.py                # Multi-Model Ensemble (LightGBM + CatBoost + XGBoost) & F0.5 Optimizer
 │   ├── submission.py           # Output TSV generation & validation routines
 │   └── validate_submission.py  # Official competition submission validator
-├── requirements.txt            # Pinned dependencies / environment
+├── requirements.txt            # Pinned dependencies / environment (lightgbm, catboost, xgboost)
 └── README.md                   # How to reproduce end-to-end
 ```
 
 ---
 
-## ⚡ Core Technical Features
+## ⚡ Core Technical Features (Target 0.98 Architecture)
 
-1. **Zero-RAM Disk Index (`index.db`)**: Uses an indexed SQLite B-Tree database storing candidate tokens across 10,320,219 records. Enables $O(\log N)$ lookup speed while utilizing $< 50$ MB RAM (eliminates OOM kernel crashes).
-2. **Balanced Cross-Source Retrieval**: Queries Source 2 and Source 3 concurrently to eliminate Source 3 B-Tree starvation.
-3. **Open-Set Country Support**: Feature formulas and country match indicators do not assume fixed geographic domains, supporting new countries present in unseen test sets.
-4. **Macro $F_{0.5}$ Optimization**: Tunes probability decision thresholds specifically for the $F_{0.5}$ score with official singleton scoring, weighting precision 4x higher than recall.
-5. **PyArrow Memory-Mapped Dataframes**: Loads large multi-gigabyte TSV files efficiently using PyArrow string backends.
+1. **Pure Zero-RAM SQLite Engine (`index_test.db`)**: Queries candidate records directly on disk using SQLite `PRIMARY KEY` B-Tree indexes (< 0.35ms per lookup). Completely avoids storing millions of records in Python memory, preventing memory bloat and swap thrashing.
+2. **High-Signal 32-Feature Extraction**:
+   - **Postal / PIN Code Match & Conflict**: Matches 5-digit US ZIPs and 6-digit Indian PIN codes; penalizes intra-country zip discrepancies.
+   - **Business Domain Anti-Collocation**: Classifies entities across 7 domains (`health`, `hospitality`, `education`, `automotive`, `food`, `finance`, `legal`) to veto false merges (e.g. *Hospital* vs *Hotel*).
+   - **Acronym & Initialism Resolver**: Matches abbreviations to corporate names (e.g. *KFC* $\leftrightarrow$ *Kentucky Fried Chicken*).
+   - **Jaro-Winkler Similarity**: Measures prefix-weighted string similarity to capture brand typos (*"Smyth"* vs *"Smith"*).
+   - **House Number Verification**: Rewards matching building numbers and penalizes street number conflicts.
+3. **Multi-Model Gradient Boosting Ensemble**:
+   - **LightGBM** (leaf-wise gradient boosting)
+   - **CatBoost** (oblivious symmetric decision trees)
+   - **XGBoost** (depth-wise regularizer)
+   - **Soft-Voting Ensemble Blend**: $P_{\text{final}} = 0.50 \cdot P_{\text{LightGBM}} + 0.30 \cdot P_{\text{CatBoost}} + 0.20 \cdot P_{\text{XGBoost}}$.
+4. **Deadlock-Free Zero-RAM Multiprocessing**:
+   - Streams 1.73M test predictions across multi-core CPUs (e.g. 6 to 10 workers) with guaranteed 1-to-1 output row ordering via `pool.imap`.
+   - Uses independent read-only SQLite connections per worker and single-threaded C++ inference to eliminate OpenMP lock contention.
+5. **Macro $F_{0.5}$ Threshold Optimizer**: Vectorized grid search on grouped (leak-proof) validation entities, weighting precision 4x higher than recall.
 
 ---
 
 ## 🚀 Execution Instructions
 
-Activate the Python virtual environment and run the pipeline runner:
+Always run within the virtual environment:
 
 ```bash
 # 1. Activate virtual environment
 source .venv/bin/activate
 
-# 2. Run the main resolution pipeline (on Train or Test split)
-python3 code/src/main.py --sample-size 50000 --max-candidates 30 --split train
+# 2. Train the Multi-Model Ensemble (on Train split)
+python3 code/src/main.py --split train --sample-size 50000 --max-candidates 40
+
+# 3. Run High-Speed Multiprocess Test Inference (on Full Test split)
+python3 code/src/main.py --split test --sample-size 0 --num-workers 8 --max-candidates 40
 ```
 
 ### Command Arguments:
-- `--sample-size`: Number of Source 1 records to evaluate (default `50000`, set to `0` or omit on test for full dataset run).
-- `--max-candidates`: Maximum number of top candidate records fetched per entity from `index.db` (default `30`).
 - `--split`: Dataset split to run on (`train` or `test`).
-- `--no-cache`: Force re-extraction of features.
+- `--sample-size`: Number of Source 1 records to evaluate (e.g., `50000` for training, `0` for the entire 1.73M test set).
+- `--max-candidates`: Maximum top candidate records fetched per entity (default `40`).
+- `--num-workers`: Number of parallel worker processes for test streaming (default: up to 8).
+- `--no-cache`: Force re-extraction of features, bypassing disk cache.
 
 ---
 
-## 📊 Output Files
+## 📊 Output Files & Submission Verification
 
-The pipeline organizes outputs cleanly into two dedicated directories:
+The pipeline organizes outputs into two dedicated directories:
 1. `output/train/`: Model weights (`lgb_model.pkl`), feature cache, and validation TSVs.
-2. `output/test/`: Competition submission files (`matching_results.tsv` and `candidate_pairs.tsv`) ready for leaderboard upload.
+2. `output/test/`: Competition submission files (`matching_results.tsv` and `candidate_pairs.tsv`).
+
+### 1. Validate Submission Format
+```bash
+python3 code/src/validate_submission.py \
+    --matching output/test/matching_results.tsv \
+    --candidate output/test/candidate_pairs.tsv \
+    --test-dir 6ab10eb3b23ba_student_resource/student_resource/dataset/test
+```
+*(Confirms non-empty lines, tab separators, candidate pool subset constraints, and 1-to-1 entity ordering matching `test_source1.tsv`)*
+
+### 2. Package Submission:
+```bash
+zip -j submission.zip output/test/matching_results.tsv output/test/candidate_pairs.tsv
+```
+
