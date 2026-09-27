@@ -196,6 +196,7 @@ def evaluate_and_report_validation(
     gt_map: Dict[str, Set[str]],
     max_candidates: int,
     title: str = "VALIDATION AUDIT & COMPETITION METRICS REPORT"
+) -> Dict[str, Any]:
     val_probs = model.predict_proba(X_val)
     if hasattr(model, "optimize_end_to_end_f05") and val_entities_list and val_pairs_list and gt_map:
         tuned_thresh = model.optimize_end_to_end_f05(val_entities_list, val_pairs_list, val_probs, gt_map)
