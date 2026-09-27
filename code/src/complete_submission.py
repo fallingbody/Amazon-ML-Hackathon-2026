@@ -32,9 +32,13 @@ def main():
         sys.exit(1)
 
     print(f"Loading required Source 1 entities from {s1_path}...")
-    df_s1 = pd.read_csv(s1_path, sep="\t", usecols=[0], engine="pyarrow")
-    id_col = df_s1.columns[0]
-    required_ids = df_s1[id_col].astype(str).tolist()
+    required_ids = []
+    with open(s1_path, "r", encoding="utf-8") as f:
+        _ = f.readline()  # skip header
+        for line in f:
+            line_str = line.strip()
+            if line_str:
+                required_ids.append(line_str.split("\t", 1)[0].strip())
     total_required = len(required_ids)
     print(f"Total required entities: {total_required:,}")
 
@@ -55,13 +59,19 @@ def main():
 
     # Write completed matching_results.tsv
     os.makedirs("output", exist_ok=True)
+    os.makedirs("unwanted_submission/output", exist_ok=True)
     out_match = "output/matching_results.tsv"
+    out_match_sub = "unwanted_submission/output/matching_results.tsv"
     print(f"Writing complete matching results to {out_match}...")
-    with open(out_match, "w", encoding="utf-8") as f:
-        f.write("source1_entity_id\tmatched_entity_ids\n")
+    with open(out_match, "w", encoding="utf-8") as f, open(out_match_sub, "w", encoding="utf-8") as f_sub:
+        header_line = "source1_entity_id\tmatched_entity_ids\n"
+        f.write(header_line)
+        f_sub.write(header_line)
         for s1_id in required_ids:
             m = existing_matches.get(s1_id, "")
-            f.write(f"{s1_id}\t{m}\n")
+            row_line = f"{s1_id}\t{m}\n"
+            f.write(row_line)
+            f_sub.write(row_line)
     print(f"Successfully generated 100% complete {out_match} ({total_required:,} entities).")
 
     # Process candidate_pairs.tsv
@@ -80,16 +90,21 @@ def main():
         print(f"Loaded {len(existing_cands):,} existing candidates.")
 
     out_cand = "output/candidate_pairs.tsv"
+    out_cand_sub = "unwanted_submission/output/candidate_pairs.tsv"
     print(f"Writing complete candidate pairs to {out_cand}...")
-    with open(out_cand, "w", encoding="utf-8") as f:
-        f.write("source1_entity_id\tcandidate_entity_ids\n")
+    with open(out_cand, "w", encoding="utf-8") as f, open(out_cand_sub, "w", encoding="utf-8") as f_sub:
+        header_line = "source1_entity_id\tcandidate_entity_ids\n"
+        f.write(header_line)
+        f_sub.write(header_line)
         for s1_id in required_ids:
             # Matches must be subset of candidates
             m = existing_matches.get(s1_id, "")
             c = existing_cands.get(s1_id, m)
             if m and m not in c:
                 c = f"{c},{m}" if c else m
-            f.write(f"{s1_id}\t{c}\n")
+            row_line = f"{s1_id}\t{c}\n"
+            f.write(row_line)
+            f_sub.write(row_line)
     print(f"Successfully generated 100% complete {out_cand} ({total_required:,} entities).")
 
     # Run official validator
