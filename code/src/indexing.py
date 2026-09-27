@@ -247,125 +247,58 @@ class CandidateIndexer:
         cursor = conn.cursor()
         candidate_pool = set()
 
-        # Pass 1: 2-Term Name Conjunction (catches multi-word matches across all 10M records)
+        # Pass 1: 2-Term Name Conjunction (highest precision match across entire dataset)
         if len(s1_name_words) >= 2:
-            for i in range(min(2, len(s1_name_words))):
-                for j in range(i + 1, min(3, len(s1_name_words))):
-                    try:
-                        cursor.execute(f"""
-                            SELECT {self._id_col} FROM token_index WHERE token = ?
-                            INTERSECT
-                            SELECT {self._id_col} FROM token_index WHERE token = ?
-                            LIMIT 300
-                        """, (s1_name_words[i], s1_name_words[j]))
-                        for (rec_id,) in cursor.fetchall():
-                            candidate_pool.add(rec_id)
-                    except Exception:
-                        pass
-
-        # Pass 2: Name token INTERSECT House number (catches entities at exact same street address)
-        if s1_name_words and s1_house:
-            for h in s1_house:
-                if len(h) >= 2:
-                    try:
-                        cursor.execute(f"""
-                            SELECT {self._id_col} FROM token_index WHERE token = ?
-                            INTERSECT
-                            SELECT {self._id_col} FROM token_index WHERE token = ?
-                            LIMIT 200
-                        """, (s1_name_words[0], h))
-                        for (rec_id,) in cursor.fetchall():
-                            candidate_pool.add(rec_id)
-                    except Exception:
-                        pass
-
-        # Pass 3: Name token INTERSECT distinctive address word
-        if s1_name_words and s1_addr_words:
-            best_addr = sorted(s1_addr_words, key=len, reverse=True)[0]
             try:
                 cursor.execute(f"""
                     SELECT {self._id_col} FROM token_index WHERE token = ?
                     INTERSECT
                     SELECT {self._id_col} FROM token_index WHERE token = ?
-                    LIMIT 200
-                """, (s1_name_words[0], best_addr))
+                    LIMIT {max_candidates}
+                """, (s1_name_words[0], s1_name_words[1]))
                 for (rec_id,) in cursor.fetchall():
                     candidate_pool.add(rec_id)
             except Exception:
                 pass
 
-        # Pass 3b: 2-Term Distinct Address Conjunction (catches entities with blank/corrupted names in S2/S3)
-        if len(s1_addr_words) >= 2:
-            top_addr = sorted(s1_addr_words, key=len, reverse=True)[:3]
-            for i in range(min(2, len(top_addr))):
-                for j in range(i + 1, min(3, len(top_addr))):
-                    try:
-                        cursor.execute(f"""
-                            SELECT {self._id_col} FROM token_index WHERE token = ?
-                            INTERSECT
-                            SELECT {self._id_col} FROM token_index WHERE token = ?
-                            LIMIT 150
-                        """, (top_addr[i], top_addr[j]))
-                        for (rec_id,) in cursor.fetchall():
-                            candidate_pool.add(rec_id)
-                    except Exception:
-                        pass
-
-        # Pass 4: Ultra-fast balanced single-token queries (S2 forward, S3 reverse)
-        for token in sorted(s1_name_words, key=len, reverse=True)[:4]:
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 450", (token,))
-            for (rec_id,) in cursor.fetchall():
-                candidate_pool.add(rec_id)
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 450", (token,))
-            for (rec_id,) in cursor.fetchall():
-                candidate_pool.add(rec_id)
-
-        # Pass 5: Distinct address tokens (balanced S2/S3)
-        for token in sorted(s1_addr_words, key=len, reverse=True)[:3]:
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 250", (token,))
-            for (rec_id,) in cursor.fetchall():
-                candidate_pool.add(rec_id)
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 250", (token,))
-            for (rec_id,) in cursor.fetchall():
-                candidate_pool.add(rec_id)
-
-        # Pass 6: Building / House numbers
-        for h in s1_house:
-            if len(h) >= 2:
-                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 300", (h,))
+        # Pass 2: Name + House number conjunction (exact street match)
+        if len(candidate_pool) < max_candidates and s1_name_words and s1_house:
+            h_list = list(s1_house)
+            try:
+                cursor.execute(f"""
+                    SELECT {self._id_col} FROM token_index WHERE token = ?
+                    INTERSECT
+                    SELECT {self._id_col} FROM token_index WHERE token = ?
+                    LIMIT {max_candidates - len(candidate_pool)}
+                """, (s1_name_words[0], h_list[0]))
                 for (rec_id,) in cursor.fetchall():
                     candidate_pool.add(rec_id)
-                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 300", (h,))
+            except Exception:
+                pass
+
+        # Pass 3: Distinctive Name Tokens (if needed)
+        if len(candidate_pool) < max_candidates and s1_name_words:
+            for token in sorted(s1_name_words, key=len, reverse=True)[:2]:
+                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT {max_candidates - len(candidate_pool)}", (token,))
                 for (rec_id,) in cursor.fetchall():
                     candidate_pool.add(rec_id)
+                if len(candidate_pool) >= max_candidates:
+                    break
 
-        # Pass 7: Postal code
-        postal = extract_postal_code(clean_a, country)
-        if postal and len(postal) >= 5:
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 300", (postal,))
-            for (rec_id,) in cursor.fetchall():
-                candidate_pool.add(rec_id)
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 300", (postal,))
-            for (rec_id,) in cursor.fetchall():
-                candidate_pool.add(rec_id)
+        # Pass 4: Address tokens (if needed)
+        if len(candidate_pool) < max_candidates and s1_addr_words:
+            for token in sorted(s1_addr_words, key=len, reverse=True)[:2]:
+                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT {max_candidates - len(candidate_pool)}", (token,))
+                for (rec_id,) in cursor.fetchall():
+                    candidate_pool.add(rec_id)
+                if len(candidate_pool) >= max_candidates:
+                    break
 
         if not candidate_pool:
             return set()
 
-        # Re-ranking candidates using multi-signal scoring
-        cand_list = list(candidate_pool)
-        cand_attributes = {}
-        if self._records_dict:
-            for cid in candidate_pool:
-                if cid in self._records_dict:
-                    cand_attributes[cid] = self._records_dict[cid]
-        else:
-            for i in range(0, len(cand_list), 900):
-                chunk_cands = cand_list[i:i + 900]
-                placeholders = ",".join("?" for _ in chunk_cands)
-                cursor.execute(f"SELECT record_id, name, address, country, dataset FROM records WHERE record_id IN ({placeholders})", chunk_cands)
-                for r in cursor.fetchall():
-                    cand_attributes[r[0]] = (r[1] or "", r[2] or "", r[3] or "", r[4] or "")
+        if len(candidate_pool) <= max_candidates:
+            return candidate_pool
 
         s1_n_set = set(s1_name_words)
         s1_a_set = set(s1_addr_words)
