@@ -7,7 +7,10 @@ import os
 import sqlite3
 import pandas as pd
 from typing import List, Set, Dict, Any
-from .preprocessing import extract_tokens, clean_text, extract_house_numbers, extract_postal_code, STOP_WORDS
+try:
+    from .preprocessing import extract_tokens, clean_text, extract_house_numbers, extract_postal_code, STOP_WORDS
+except (ImportError, ValueError):
+    from preprocessing import extract_tokens, clean_text, extract_house_numbers, extract_postal_code, STOP_WORDS
 
 def resolve_db_path(db_path: str = None, split: str = "train") -> str:
     if db_path:
@@ -285,10 +288,12 @@ class CandidateIndexer:
                     cand_attributes[cid] = self._records_dict[cid]
         else:
             cand_list = list(candidate_pool)
-            placeholders = ",".join("?" for _ in cand_list)
-            cursor.execute(f"SELECT record_id, name, address, country, dataset FROM records WHERE record_id IN ({placeholders})", cand_list)
-            for r in cursor.fetchall():
-                cand_attributes[r[0]] = (r[1] or "", r[2] or "", r[3] or "", r[4] or "")
+            for i in range(0, len(cand_list), 900):
+                chunk_cands = cand_list[i:i + 900]
+                placeholders = ",".join("?" for _ in chunk_cands)
+                cursor.execute(f"SELECT record_id, name, address, country, dataset FROM records WHERE record_id IN ({placeholders})", chunk_cands)
+                for r in cursor.fetchall():
+                    cand_attributes[r[0]] = (r[1] or "", r[2] or "", r[3] or "", r[4] or "")
 
         scored_candidates = []
         for cid, rec in cand_attributes.items():

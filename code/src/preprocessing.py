@@ -140,9 +140,17 @@ def check_acronym_match(name1: str, name2: str) -> float:
         initials2 = "".join(w[0] for w in w2).lower()
         if name1.lower() == initials2 or initials2.startswith(name1.lower()):
             return 1.0
+        connectives = {"of", "and", "the", "for", "in", "to", "on", "at", "de", "des", "du"}
+        initials2_clean = "".join(w[0] for w in w2 if w.lower() not in connectives).lower()
+        if initials2_clean and (name1.lower() == initials2_clean or initials2_clean.startswith(name1.lower())):
+            return 1.0
     if len(name2) <= 6 and name2.isalpha() and len(w1) >= 2:
         initials1 = "".join(w[0] for w in w1).lower()
         if name2.lower() == initials1 or initials1.startswith(name2.lower()):
+            return 1.0
+        connectives = {"of", "and", "the", "for", "in", "to", "on", "at", "de", "des", "du"}
+        initials1_clean = "".join(w[0] for w in w1 if w.lower() not in connectives).lower()
+        if initials1_clean and (name2.lower() == initials1_clean or initials1_clean.startswith(name2.lower())):
             return 1.0
     return 0.0
 

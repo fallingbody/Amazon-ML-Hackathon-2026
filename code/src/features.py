@@ -6,10 +6,16 @@ High-speed vectorized string similarity metrics.
 """
 import re
 from typing import Dict, Any, Set
-from .preprocessing import (
-    clean_text, extract_house_numbers, extract_postal_code,
-    extract_domain_category, check_acronym_match, jaro_winkler
-)
+try:
+    from .preprocessing import (
+        clean_text, extract_house_numbers, extract_postal_code,
+        extract_domain_category, check_acronym_match, jaro_winkler
+    )
+except (ImportError, ValueError):
+    from preprocessing import (
+        clean_text, extract_house_numbers, extract_postal_code,
+        extract_domain_category, check_acronym_match, jaro_winkler
+    )
 
 def jaccard_similarity(set1: Set, set2: Set) -> float:
     """Computes Jaccard similarity between two sets."""
