@@ -219,10 +219,24 @@ def main():
     chunks = [s1_tuples[i:i + args.chunk_size] for i in range(0, n_s1, args.chunk_size)]
     print(f"  Split {n_s1:,} entities into {len(chunks):,} chunks for {args.num_workers} parallel workers.", flush=True)
 
-    # 3. Stream Inference via Multiprocessing
+    # 3. Stream Inference via Multiprocessing (Instantaneous Linux Fork - Zero Serialization)
     print(f"\n[3/3] Streaming inference across {args.num_workers} workers...", flush=True)
     match_out_path = os.path.join(args.output_dir, "matching_results.tsv")
     cand_out_path = os.path.join(args.output_dir, "candidate_pairs.tsv")
+
+    # Set globals directly for zero-overhead fork sharing
+    global _G_INV_INDEX, _G_CAND_IDS, _G_NAME_GRAMS, _G_ALL_GRAMS, _G_HOUSES, _G_THRESH
+    _G_INV_INDEX = inv_index
+    _G_CAND_IDS = cand_ids
+    _G_NAME_GRAMS = cand_name_grams
+    _G_ALL_GRAMS = cand_all_grams
+    _G_HOUSES = cand_houses
+    _G_THRESH = args.threshold
+
+    try:
+        mp.set_start_method("fork", force=True)
+    except Exception:
+        pass
 
     t_start = time.time()
     processed_count = 0
@@ -234,22 +248,21 @@ def main():
         # Header for candidate_pairs
         f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
 
-        with mp.Pool(
-            processes=args.num_workers,
-            initializer=_init_worker,
-            initargs=(inv_index, cand_ids, cand_name_grams, cand_all_grams, cand_houses, args.threshold)
-        ) as pool:
-
+        print("  Starting worker pool instantly via Linux fork...", flush=True)
+        with mp.Pool(processes=args.num_workers) as pool:
             for match_lines, cand_lines in pool.imap(_process_chunk, chunks, chunksize=1):
                 f_match.writelines(match_lines)
                 f_cand.writelines(cand_lines)
+                f_match.flush()
+                f_cand.flush()
 
                 processed_count += len(match_lines)
                 for line in match_lines:
                     if not line.endswith("\t\n") and not line.endswith("\t"):
                         positive_matches += 1
 
-                if processed_count % 100000 < args.chunk_size or processed_count == n_s1:
+                # Frequent progress logging every 20,000 entities
+                if processed_count % 20000 < args.chunk_size or processed_count == n_s1:
                     elapsed = time.time() - t_start
                     rate = processed_count / elapsed if elapsed > 0 else 0
                     print(f"  Progress: {processed_count:,}/{n_s1:,} ({processed_count/n_s1*100:.1f}%) | "
