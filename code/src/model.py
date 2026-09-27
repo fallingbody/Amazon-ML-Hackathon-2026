@@ -94,7 +94,7 @@ class EntityResolutionModel:
                     eval_metric="Logloss",
                     random_seed=42,
                     verbose=0,
-                    thread_count=1
+                    thread_count=-1
                 )
                 if X_val is not None and y_val is not None:
                     self.cb_clf.fit(X_train, y_train, eval_set=(X_val, y_val), early_stopping_rounds=30, verbose=False)
@@ -114,7 +114,7 @@ class EntityResolutionModel:
                     learning_rate=0.06,
                     max_depth=6,
                     eval_metric="logloss",
-                    n_jobs=1,
+                    n_jobs=-1,
                     random_state=42
                 )
                 if X_val is not None and y_val is not None:

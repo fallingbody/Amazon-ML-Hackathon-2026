@@ -80,6 +80,13 @@ class CandidateIndexer:
             cursor = self._conn.cursor()
             cursor.execute("PRAGMA cache_size = -64000")
             cursor.execute("PRAGMA temp_store = MEMORY")
+            try:
+                cursor.execute("PRAGMA table_info(token_index)")
+                cols = [row[1] for row in cursor.fetchall()]
+                if cols:
+                    self._id_col = "record_id" if "record_id" in cols else "entity_id"
+            except Exception:
+                pass
             cursor.close()
         return self._conn
 

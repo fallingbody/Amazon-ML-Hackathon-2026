@@ -89,6 +89,53 @@ def _process_test_chunk(chunk_s1: list) -> tuple:
         match_lines.append(f"{s1_id}\t{','.join(matches)}\n")
     return cand_lines, match_lines
 
+_WORKER_GT_MAP = None
+
+def _init_train_worker(db_path: str, dataset_base: str, max_candidates: int, gt_map: dict):
+    global _WORKER_INDEXER, _WORKER_MAX_CANDS, _WORKER_GT_MAP
+    _WORKER_INDEXER = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split="train", is_worker=True)
+    _WORKER_INDEXER._records_dict = None  # Pure Zero-RAM disk mode via SQLite Primary Key
+    _WORKER_INDEXER.get_frequent_tokens()
+    _WORKER_MAX_CANDS = max_candidates
+    _WORKER_GT_MAP = gt_map
+
+def _process_train_chunk(chunk_s1: list) -> tuple:
+    chunk_cands_map = {}
+    chunk_pairs = []
+    chunk_features = []
+    chunk_labels = []
+
+    for s1_rec in chunk_s1:
+        s1_id = str(s1_rec["record_id"])
+        s1_country = str(s1_rec.get("country", "")).strip().lower()
+        cand_ids = list(_WORKER_INDEXER.find_candidates_for_record(
+            name=str(s1_rec.get("name", "")),
+            address=str(s1_rec.get("address", "")),
+            max_candidates=_WORKER_MAX_CANDS,
+            country=s1_country
+        ))
+        chunk_cands_map[s1_id] = cand_ids
+        if not cand_ids:
+            continue
+
+        cand_records = _WORKER_INDEXER.fetch_records_by_ids(cand_ids, split="train")
+        s1_gt_targets = _WORKER_GT_MAP.get(s1_id, set())
+        s1_precomputed = precompute_s1_features(s1_rec)
+
+        for cand_rec in cand_records:
+            cand_id = str(cand_rec["record_id"])
+            c2_country = str(cand_rec.get("country", "")).strip().lower()
+            if s1_country and c2_country and s1_country != c2_country:
+                continue
+
+            chunk_pairs.append((s1_id, cand_id))
+            feats = compute_pair_features(s1_rec, cand_rec, s1_precomputed)
+            chunk_features.append(feats)
+            is_match = 1 if cand_id in s1_gt_targets else 0
+            chunk_labels.append(is_match)
+
+    return chunk_cands_map, chunk_pairs, chunk_features, chunk_labels
+
 def find_dataset_base() -> str:
     """Dynamically resolves dataset folder location across local, SageMaker, and Colab environments."""
     possible_paths = [
@@ -368,58 +415,79 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 40, split: str 
         indexer.get_frequent_tokens()
 
 
-        print(f"\nQuerying SQLite B-Tree index and building feature vectors (max_candidates={max_candidates})...", flush=True)
         s1_records = df_s1.to_dict("records")
         start_time = time.time()
-        
-        for idx, s1_rec in enumerate(s1_records):
-            s1_id = str(s1_rec["record_id"])
-            s1_country = str(s1_rec.get("country", "")).strip().lower()
-            cand_ids = list(indexer.find_candidates_for_record(
-                name=str(s1_rec.get("name", "")),
-                address=str(s1_rec.get("address", "")),
-                max_candidates=max_candidates,
-                country=s1_country
-            ))
-            
-            candidates_map[s1_id] = cand_ids
-            results_map[s1_id] = []
-            
-            if not cand_ids:
-                continue
 
-            # Fetch candidate attribute details in O(1) time
-            cand_records = indexer.fetch_records_by_ids(cand_ids, split=split)
+        if num_workers > 1:
+            indexer.close()  # CRITICAL: Close SQLite connection in parent before fork to avoid deadlock in workers
+            chunk_size = 250
+            chunks = [s1_records[i:i + chunk_size] for i in range(0, len(s1_records), chunk_size)]
+            print(f"Extracting features with {num_workers} parallel workers across {len(chunks):,} chunks...", flush=True)
 
-            s1_gt_targets = gt_map.get(s1_id, set())
+            s1_id_set = {str(r["record_id"]) for r in s1_records}
+            relevant_gt = {k: v for k, v in gt_map.items() if k in s1_id_set}
 
-            # Precompute string operations for S1 once, instead of 30 times for each candidate
-            s1_precomputed = precompute_s1_features(s1_rec)
+            processed_count = 0
+            with mp.Pool(
+                processes=num_workers,
+                initializer=_init_train_worker,
+                initargs=(db_path, dataset_base, max_candidates, relevant_gt)
+            ) as pool:
+                for c_cands, c_pairs, c_feats, c_labels in pool.imap(_process_train_chunk, chunks, chunksize=1):
+                    candidates_map.update(c_cands)
+                    all_candidate_pairs.extend(c_pairs)
+                    features_list.extend(c_feats)
+                    labels_list.extend(c_labels)
+                    processed_count += len(c_cands)
 
-            for cand_rec in cand_records:
-                cand_id = str(cand_rec["record_id"])
-                c2_country = str(cand_rec.get("country", "")).strip().lower()
-                # Open-set country filter: reject impossible cross-country pairs
-                if s1_country and c2_country and s1_country != c2_country:
+                    if processed_count % 1000 == 0 or processed_count == len(s1_records) or len(s1_records) <= 2000:
+                        elapsed = time.time() - start_time
+                        pct = processed_count / len(s1_records) * 100
+                        rate = processed_count / elapsed if elapsed > 0 else 0
+                        eta = (len(s1_records) - processed_count) / rate if rate > 0 else 0
+                        print(f"  [{pct:5.1f}%] Processed {processed_count:,} / {len(s1_records):,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
+
+            results_map = {s1_id: [] for s1_id in candidates_map}
+        else:
+            print(f"\nQuerying SQLite B-Tree index and building feature vectors sequentially (max_candidates={max_candidates})...", flush=True)
+            for idx, s1_rec in enumerate(s1_records):
+                s1_id = str(s1_rec["record_id"])
+                s1_country = str(s1_rec.get("country", "")).strip().lower()
+                cand_ids = list(indexer.find_candidates_for_record(
+                    name=str(s1_rec.get("name", "")),
+                    address=str(s1_rec.get("address", "")),
+                    max_candidates=max_candidates,
+                    country=s1_country
+                ))
+                
+                candidates_map[s1_id] = cand_ids
+                results_map[s1_id] = []
+                
+                if not cand_ids:
                     continue
 
-                all_candidate_pairs.append((s1_id, cand_id))
-                
-                # Extract features (uses precomputed S1 to skip redundant regex processing)
-                feats = compute_pair_features(s1_rec, cand_rec, s1_precomputed)
-                features_list.append(feats)
-                
-                # Ground truth label (1 if candidate in ground truth, else 0)
-                is_match = 1 if cand_id in s1_gt_targets else 0
-                labels_list.append(is_match)
+                cand_records = indexer.fetch_records_by_ids(cand_ids, split=split)
+                s1_gt_targets = gt_map.get(s1_id, set())
+                s1_precomputed = precompute_s1_features(s1_rec)
 
-            # Print Percentage Progress every 200 entities with instant flush
-            if (idx + 1) % 200 == 0 or (idx + 1) == len(s1_records):
-                elapsed = time.time() - start_time
-                pct = (idx + 1) / len(s1_records) * 100
-                rate = (idx + 1) / elapsed if elapsed > 0 else 0
-                eta = (len(s1_records) - (idx + 1)) / rate if rate > 0 else 0
-                print(f"  [{pct:5.1f}%] Processed {idx + 1:,} / {len(s1_records):,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
+                for cand_rec in cand_records:
+                    cand_id = str(cand_rec["record_id"])
+                    c2_country = str(cand_rec.get("country", "")).strip().lower()
+                    if s1_country and c2_country and s1_country != c2_country:
+                        continue
+
+                    all_candidate_pairs.append((s1_id, cand_id))
+                    feats = compute_pair_features(s1_rec, cand_rec, s1_precomputed)
+                    features_list.append(feats)
+                    is_match = 1 if cand_id in s1_gt_targets else 0
+                    labels_list.append(is_match)
+
+                if (idx + 1) % 200 == 0 or (idx + 1) == len(s1_records):
+                    elapsed = time.time() - start_time
+                    pct = (idx + 1) / len(s1_records) * 100
+                    rate = (idx + 1) / elapsed if elapsed > 0 else 0
+                    eta = (len(s1_records) - (idx + 1)) / rate if rate > 0 else 0
+                    print(f"  [{pct:5.1f}%] Processed {idx + 1:,} / {len(s1_records):,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
 
         if not no_cache:
             print(f"\nSaving {len(features_list):,} extracted features to {cache_path} for fast future re-runs...", flush=True)
