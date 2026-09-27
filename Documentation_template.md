@@ -129,7 +129,8 @@ The table below traces performance progression across architectural iterations e
 | **v2.0 Optimized** | S2 + S3 Indexed, 17 features, Macro threshold tuning | 60.95% | 81.25% | 63.63% | **0.6841** | Full S3 indexing, candidate re-ranking |
 | **v3.0 Conjunctions**| Name Conjunctions (`INTERSECT`), 32 features, 180 cands | 83.68% | 94.38% | 87.67% | **0.8411** | Name conjunctions, domain clash veto |
 | **v4.0 Chunk 1**| Address Conjunctions (Pass 3b), 40k entities, 100 trees | 88.25% | 94.69% | 85.84% | **0.8575** | Address conjunctions, threshold 0.585 |
-| **v4.1 Chunk 2**| Continual Learning, 80k entities, 200 trees (`init_model`) | **88.25%** | **94.43%** | **87.11%** | **0.8618 $\rightarrow$ 0.9000+** | +195 TP recovered, threshold 0.570 |
+| **v4.1 Chunk 2**| Continual Learning, 80k entities, 200 trees (`init_model`) | 88.25% | 94.43% | 87.11% | **0.8618** | +195 TP recovered, threshold 0.570 |
+| **v4.2 Calibrated Ensemble**| **Triple Stacking (LGB+CB+XGB) @ Threshold 0.650** | **88.25%** | **95.56%** | **86.07%** | **0.8639** | **Ultra-clean (612 FP, 95.56% Prec), Pairwise F0.5 = 0.9350** |
 
 ### 5.2 Error Analysis & Mitigation
 - **Mitigating False Over-Merges (False Positives):** Co-located businesses in commercial hubs previously received high lexical similarity scores due to matching street names. The `domain_conflict` veto (e.g. detecting *Health* vs. *Food*) and `postal_conflict` check eliminated these errors, keeping precision at **$94.69\%$**.
