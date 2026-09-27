@@ -17,7 +17,7 @@ import argparse
 import pandas as pd
 import numpy as np
 import multiprocessing as mp
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any, Set
 
 # Ensure src and parent directories are in python path for flexible execution
 src_dir = os.path.dirname(os.path.abspath(__file__))
@@ -177,10 +177,125 @@ def parse_args():
     parser.add_argument("--split", type=str, default="train", choices=["train", "test"], help="Dataset split to run on (train or test)")
     parser.add_argument("--no-cache", action="store_true", help="Disable caching of extracted features")
     parser.add_argument("--db-path", type=str, default=None, help="Explicit path to SQLite index.db (optional)")
-    parser.add_argument("--num-workers", type=int, default=min(8, os.cpu_count() or 4), help="Number of parallel worker processes for test streaming (default: min(8, CPU count))")
+    parser.add_argument("--num-workers", type=int, default=min(8, os.cpu_count() or 4), help="Number of parallel worker processes (default: min(8, CPU count))")
+    parser.add_argument("--num-chunks", type=int, default=1, help="Number of sequential training chunks to process (default: 1)")
+    parser.add_argument("--chunk-size", type=int, default=None, help="Size of each training chunk (overrides --sample-size if provided)")
+    parser.add_argument("--chunk-offset", type=int, default=0, help="Starting record offset for chunk training (default: 0)")
+    parser.add_argument("--val-size", type=int, default=2000, help="Number of Source 1 entities for fixed holdout validation (default: 2,000)")
+    parser.add_argument("--trees-per-chunk", type=int, default=100, help="Number of trees to add per chunk in multi-chunk training (default: 100)")
+    parser.add_argument("--continue-training", action="store_true", help="Continue training from existing model checkpoint")
     return parser.parse_args()
 
-def run_pipeline(sample_size: int = 50000, max_candidates: int = 40, split: str = "train", no_cache: bool = False, db_path_arg: str = None, num_workers: int = None):
+def evaluate_and_report_validation(
+    model: EntityResolutionModel,
+    X_val: pd.DataFrame,
+    y_val: np.ndarray,
+    val_entities_list: List[str],
+    val_pairs_list: List[Any],
+    gt_map: Dict[str, Set[str]],
+    max_candidates: int,
+    title: str = "VALIDATION AUDIT & COMPETITION METRICS REPORT"
+) -> Dict[str, Any]:
+    val_probs = model.predict_proba(X_val)
+    val_preds = (val_probs >= model.optimal_threshold).astype(int)
+
+    tp = int(np.sum((val_preds == 1) & (y_val == 1)))
+    fp = int(np.sum((val_preds == 1) & (y_val == 0)))
+    fn = int(np.sum((val_preds == 0) & (y_val == 1)))
+    tn = int(np.sum((val_preds == 0) & (y_val == 0)))
+
+    cand_prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    cand_rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    cand_f05 = (1.25 * cand_prec * cand_rec) / (0.25 * cand_prec + cand_rec) if (0.25 * cand_prec + cand_rec) > 0 else 0.0
+
+    ent_to_idx = {e: i for i, e in enumerate(val_entities_list)}
+    n_val_ents = len(val_entities_list)
+    gt_counts = np.array([len(gt_map.get(e, set())) for e in val_entities_list], dtype=float)
+    total_val_gt = int(np.sum(gt_counts))
+    val_singletons = int(np.sum(gt_counts == 0))
+
+    pair_ents = np.array([ent_to_idx[p[0]] for p in val_pairs_list])
+    pair_is_gt = np.array([p[1] in gt_map.get(p[0], set()) for p in val_pairs_list])
+
+    tp_pairs = (val_preds == 1) & pair_is_gt
+    fp_pairs = (val_preds == 1) & (~pair_is_gt)
+
+    tp_g = np.bincount(pair_ents, weights=tp_pairs, minlength=n_val_ents)
+    fp_g = np.bincount(pair_ents, weights=fp_pairs, minlength=n_val_ents)
+
+    p_den = tp_g + fp_g
+    e2e_prec_g = np.divide(tp_g, p_den, out=np.zeros_like(tp_g, dtype=float), where=p_den != 0)
+    e2e_rec_g = np.divide(tp_g, gt_counts, out=np.zeros_like(tp_g, dtype=float), where=gt_counts != 0)
+
+    f_den = 0.25 * e2e_prec_g + e2e_rec_g
+    f05_g = np.divide(1.25 * e2e_prec_g * e2e_rec_g, f_den, out=np.zeros_like(e2e_prec_g), where=f_den != 0)
+
+    singleton_mask = (gt_counts == 0)
+    correct_singletons = int(np.sum(singleton_mask & (fp_g == 0)))
+    false_singletons = int(np.sum(singleton_mask & (fp_g > 0)))
+    f05_g[singleton_mask & (fp_g == 0)] = 1.0
+    f05_g[singleton_mask & (fp_g > 0)] = 0.0
+
+    competition_macro_f05 = float(np.mean(f05_g))
+    retrieved_in_pool = int(np.sum(y_val))
+    blocking_recall = (retrieved_in_pool / total_val_gt * 100) if total_val_gt > 0 else 100.0
+
+    print("\n" + "=" * 65, flush=True)
+    print(f"       {title}       ", flush=True)
+    print("=" * 65, flush=True)
+    print("  --- 1. Validation Cohort & Stage 1 Retrieval ---", flush=True)
+    print(f"  Holdout S1 Entities       : {n_val_ents:,} (100% leak-proof grouped)", flush=True)
+    print(f"  Total Ground Truth Matches: {total_val_gt:,}", flush=True)
+    print(f"  True Singletons in GT     : {val_singletons:,} ({val_singletons/n_val_ents*100:.1f}%)", flush=True)
+    print(f"  Stage 1 Candidates Formed : {len(y_val):,} pairs", flush=True)
+    print(f"  Stage 1 Candidate Recall  : {blocking_recall:.2f}% ({retrieved_in_pool:,} / {total_val_gt:,} true matches in top-{max_candidates})", flush=True)
+    print("-" * 65, flush=True)
+    print("  --- 2. Pairwise Classifier Diagnostics (Conditional on Retrieval) ---", flush=True)
+    print(f"  Optimal Decision Threshold: {model.optimal_threshold:.3f}", flush=True)
+    print(f"  Candidate True Positives  : {tp:,}", flush=True)
+    print(f"  Candidate False Positives : {fp:,}", flush=True)
+    print(f"  Candidate False Negatives : {fn:,}", flush=True)
+    print(f"  Candidate True Negatives  : {tn:,}", flush=True)
+    print(f"  Pairwise Precision        : {cand_prec * 100:.2f}%", flush=True)
+    print(f"  Pairwise Recall (on cands): {cand_rec * 100:.2f}%", flush=True)
+    print(f"  Pairwise F0.5 (on cands)  : {cand_f05:.4f}", flush=True)
+    print("-" * 65, flush=True)
+    print("  --- 3. OFFICIAL END-TO-END COMPETITION LEADERBOARD METRIC ---", flush=True)
+    print(f"  Correct Singletons (1.0)  : {correct_singletons:,} / {val_singletons:,}", flush=True)
+    print(f"  False Merges on Singletons: {false_singletons:,} / {val_singletons:,}", flush=True)
+    print(f"  End-to-End True Positives : {int(np.sum(tp_g)):,} / {total_val_gt:,} total matches", flush=True)
+    print(f"  >>> COMPETITION MACRO F0.5: {competition_macro_f05:.4f} <<< [OFFICIAL SCORER EQUIVALENT]", flush=True)
+    print("=" * 65 + "\n", flush=True)
+
+    metrics = {
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
+        "cand_prec": float(cand_prec),
+        "cand_rec": float(cand_rec),
+        "cand_f05": float(cand_f05),
+        "blocking_recall": float(blocking_recall),
+        "macro_f05": float(competition_macro_f05),
+        "threshold": float(model.optimal_threshold)
+    }
+    model.val_metrics = metrics
+    return metrics
+
+def run_pipeline(
+    sample_size: int = 50000,
+    max_candidates: int = 40,
+    split: str = "train",
+    no_cache: bool = False,
+    db_path_arg: str = None,
+    num_workers: int = None,
+    num_chunks: int = 1,
+    chunk_size: int = None,
+    chunk_offset: int = 0,
+    val_size: int = 2000,
+    trees_per_chunk: int = 100,
+    continue_training: bool = False
+):
     if num_workers is None:
         num_workers = min(8, os.cpu_count() or 4)
     dataset_base = find_dataset_base()
@@ -203,22 +318,21 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 40, split: str 
         print(f"  - {s1_path}")
         return
 
-    # 1. Load Source 1 Sample
-    print(f"\n[1/5] Loading Source 1 records from {s1_path} (limit={sample_size:,})...", flush=True)
-    if sample_size and sample_size > 0:
-        df_s1 = pd.read_csv(s1_path, sep="\t", nrows=sample_size)
-    else:
-        df_s1 = pd.read_csv(s1_path, sep="\t", engine="pyarrow")
-    
-    # Standardize column names
-    rename_dict = {}
-    if "entity_id" in df_s1.columns: rename_dict["entity_id"] = "record_id"
-    if "business_name" in df_s1.columns: rename_dict["business_name"] = "name"
-    if "business_address" in df_s1.columns: rename_dict["business_address"] = "address"
-    if rename_dict:
-        df_s1 = df_s1.rename(columns=rename_dict)
-
-    print(f"Loaded {len(df_s1):,} Source 1 records.", flush=True)
+    # 1. Load Source 1 Sample (Only needed for test streaming inference)
+    if split == "test":
+        print(f"\n[1/5] Loading Source 1 records from {s1_path} (limit={sample_size:,})...", flush=True)
+        if sample_size and sample_size > 0:
+            df_s1 = pd.read_csv(s1_path, sep="\t", nrows=sample_size)
+        else:
+            df_s1 = pd.read_csv(s1_path, sep="\t", engine="pyarrow")
+        
+        rename_dict = {}
+        if "entity_id" in df_s1.columns: rename_dict["entity_id"] = "record_id"
+        if "business_name" in df_s1.columns: rename_dict["business_name"] = "name"
+        if "business_address" in df_s1.columns: rename_dict["business_address"] = "address"
+        if rename_dict:
+            df_s1 = df_s1.rename(columns=rename_dict)
+        print(f"Loaded {len(df_s1):,} Source 1 records.", flush=True)
 
     # 2. Fast Vectorized Ground Truth Mapping Load (only needed for train split)
     gt_map = {}
@@ -379,281 +493,205 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 40, split: str 
         return
 
     # ======================================================================
-    # TRAINING PIPELINE (split == 'train')
+    # MULTI-CHUNK CONTINUAL TRAINING PIPELINE (split == 'train')
     # ======================================================================
-    cache_path = os.path.join(train_dir, f"cache_features_{split}_{len(df_s1)}_{max_candidates}_v2.pkl")
-    
-    all_candidate_pairs = []
-    candidates_map = {}
-    results_map = {}
-    features_list = []
-    labels_list = []
+    effective_chunk_size = chunk_size if chunk_size else sample_size
 
-    loaded_from_cache = False
-    if not no_cache and os.path.exists(cache_path):
-        print(f"\n[2/5] Found existing cached features: {cache_path}! Loading...", flush=True)
+    # 1. Locked Fixed Holdout Validation Benchmark
+    val_cache_path = os.path.join(train_dir, f"fixed_val_set_{val_size}_{max_candidates}.pkl")
+    if os.path.exists(val_cache_path) and not no_cache:
+        print(f"\n[2/5] Loading Locked Fixed Validation Benchmark from {val_cache_path}...", flush=True)
         try:
-            with open(cache_path, "rb") as f:
-                cached = pickle.load(f)
-                candidates_map = cached["candidates_map"]
-                results_map = cached["results_map"]
-                all_candidate_pairs = cached["all_candidate_pairs"]
-                features_list = cached["features_list"]
-                labels_list = cached["labels_list"]
-            print(f"Successfully loaded {len(features_list):,} candidate pair features from cache in seconds!", flush=True)
-            loaded_from_cache = True
+            with open(val_cache_path, "rb") as f:
+                val_data = pickle.load(f)
+            val_entities_list = val_data["val_entities"]
+            val_pairs_list = val_data["val_pairs"]
+            X_val = val_data["X_val"]
+            y_val = val_data["y_val"]
+            val_groups = val_data.get("val_groups")
+            val_entities_set = set(val_entities_list)
+            print(f"Loaded locked holdout benchmark ({len(val_entities_list):,} entities, {len(y_val):,} pairs).", flush=True)
         except Exception as e:
-            print(f"Warning: Failed to load cache ({e}), re-extracting features...", flush=True)
-            loaded_from_cache = False
+            print(f"Warning: Failed to load validation cache ({e}), regenerating...", flush=True)
+            val_entities_list = None
+    else:
+        val_entities_list = None
 
-    if not loaded_from_cache:
-        print(f"\n[2/5] Initializing Pure Zero-RAM SQLite Disk Index ({split.upper()} set)...", flush=True)
-        indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split=split)
-        indexer._records_dict = None  # Pure Zero-RAM disk mode via SQLite Primary Key
-        
-        print("Pre-caching frequent tokens to accelerate searches...", flush=True)
-        indexer.get_frequent_tokens()
+    if val_entities_list is None:
+        print(f"\n[2/5] Creating and locking Fixed Validation Benchmark ({val_size:,} entities from holdout slice)...", flush=True)
+        # Sample val_size entities from the tail of the dataset (skiprows = 2,206,821 - val_size)
+        val_skip = max(0, 2206821 - val_size)
+        df_val_raw = pd.read_csv(s1_path, sep="\t", skiprows=range(1, val_skip + 1), nrows=val_size)
+        rename_dict = {}
+        if "entity_id" in df_val_raw.columns: rename_dict["entity_id"] = "record_id"
+        if "business_name" in df_val_raw.columns: rename_dict["business_name"] = "name"
+        if "business_address" in df_val_raw.columns: rename_dict["business_address"] = "address"
+        if rename_dict:
+            df_val_raw = df_val_raw.rename(columns=rename_dict)
+        val_entities_list = df_val_raw["record_id"].astype(str).tolist()
+        val_entities_set = set(val_entities_list)
 
+        val_records = df_val_raw.to_dict("records")
+        val_chunks = [val_records[i:i + 250] for i in range(0, len(val_records), 250)]
+        val_relevant_gt = {k: v for k, v in gt_map.items() if k in val_entities_set}
 
-        s1_records = df_s1.to_dict("records")
-        start_time = time.time()
+        val_pairs_list = []
+        val_features_list = []
+        val_labels_list = []
 
-        if num_workers > 1:
-            indexer.close()  # CRITICAL: Close SQLite connection in parent before fork to avoid deadlock in workers
-            chunk_size = 250
-            chunks = [s1_records[i:i + chunk_size] for i in range(0, len(s1_records), chunk_size)]
-            print(f"Extracting features with {num_workers} parallel workers across {len(chunks):,} chunks...", flush=True)
+        print(f"Extracting validation candidate pairs & features with {num_workers} parallel workers...", flush=True)
+        with mp.Pool(
+            processes=num_workers,
+            initializer=_init_train_worker,
+            initargs=(db_path, dataset_base, max_candidates, val_relevant_gt)
+        ) as pool:
+            for _, c_pairs, c_feats, c_labels in pool.imap(_process_train_chunk, val_chunks, chunksize=1):
+                val_pairs_list.extend(c_pairs)
+                val_features_list.extend(c_feats)
+                val_labels_list.extend(c_labels)
 
-            s1_id_set = {str(r["record_id"]) for r in s1_records}
-            relevant_gt = {k: v for k, v in gt_map.items() if k in s1_id_set}
+        X_val = pd.DataFrame(val_features_list)
+        y_val = np.array(val_labels_list)
+        val_groups = np.array([p[0] for p in val_pairs_list])
 
-            processed_count = 0
-            with mp.Pool(
-                processes=num_workers,
-                initializer=_init_train_worker,
-                initargs=(db_path, dataset_base, max_candidates, relevant_gt)
-            ) as pool:
-                for c_cands, c_pairs, c_feats, c_labels in pool.imap(_process_train_chunk, chunks, chunksize=1):
-                    candidates_map.update(c_cands)
-                    all_candidate_pairs.extend(c_pairs)
-                    features_list.extend(c_feats)
-                    labels_list.extend(c_labels)
-                    processed_count += len(c_cands)
+        val_data = {
+            "val_entities": val_entities_list,
+            "val_pairs": val_pairs_list,
+            "X_val": X_val,
+            "y_val": y_val,
+            "val_groups": val_groups
+        }
+        with open(val_cache_path, "wb") as f:
+            pickle.dump(val_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Locked fixed holdout benchmark ({len(val_entities_list):,} entities, {len(y_val):,} pairs) saved to {val_cache_path}.", flush=True)
+        del df_val_raw, val_records, val_chunks, val_relevant_gt, val_features_list, val_labels_list
+        gc.collect()
 
-                    if processed_count % 1000 == 0 or processed_count == len(s1_records) or len(s1_records) <= 2000:
-                        elapsed = time.time() - start_time
-                        pct = processed_count / len(s1_records) * 100
-                        rate = processed_count / elapsed if elapsed > 0 else 0
-                        eta = (len(s1_records) - processed_count) / rate if rate > 0 else 0
-                        print(f"  [{pct:5.1f}%] Processed {processed_count:,} / {len(s1_records):,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
-
-            results_map = {s1_id: [] for s1_id in candidates_map}
-        else:
-            print(f"\nQuerying SQLite B-Tree index and building feature vectors sequentially (max_candidates={max_candidates})...", flush=True)
-            for idx, s1_rec in enumerate(s1_records):
-                s1_id = str(s1_rec["record_id"])
-                s1_country = str(s1_rec.get("country", "")).strip().lower()
-                cand_ids = list(indexer.find_candidates_for_record(
-                    name=str(s1_rec.get("name", "")),
-                    address=str(s1_rec.get("address", "")),
-                    max_candidates=max_candidates,
-                    country=s1_country
-                ))
-                
-                candidates_map[s1_id] = cand_ids
-                results_map[s1_id] = []
-                
-                if not cand_ids:
-                    continue
-
-                cand_records = indexer.fetch_records_by_ids(cand_ids, split=split)
-                s1_gt_targets = gt_map.get(s1_id, set())
-                s1_precomputed = precompute_s1_features(s1_rec)
-
-                for cand_rec in cand_records:
-                    cand_id = str(cand_rec["record_id"])
-                    c2_country = str(cand_rec.get("country", "")).strip().lower()
-                    if s1_country and c2_country and s1_country != c2_country:
-                        continue
-
-                    all_candidate_pairs.append((s1_id, cand_id))
-                    feats = compute_pair_features(s1_rec, cand_rec, s1_precomputed)
-                    features_list.append(feats)
-                    is_match = 1 if cand_id in s1_gt_targets else 0
-                    labels_list.append(is_match)
-
-                if (idx + 1) % 200 == 0 or (idx + 1) == len(s1_records):
-                    elapsed = time.time() - start_time
-                    pct = (idx + 1) / len(s1_records) * 100
-                    rate = (idx + 1) / elapsed if elapsed > 0 else 0
-                    eta = (len(s1_records) - (idx + 1)) / rate if rate > 0 else 0
-                    print(f"  [{pct:5.1f}%] Processed {idx + 1:,} / {len(s1_records):,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
-
-        if not no_cache:
-            print(f"\nSaving {len(features_list):,} extracted features to {cache_path} for fast future re-runs...", flush=True)
-            try:
-                with open(cache_path, "wb") as f:
-                    pickle.dump({
-                        "candidates_map": candidates_map,
-                        "results_map": results_map,
-                        "all_candidate_pairs": all_candidate_pairs,
-                        "features_list": features_list,
-                        "labels_list": labels_list
-                    }, f, protocol=pickle.HIGHEST_PROTOCOL)
-                print(f"Cache saved successfully.", flush=True)
-            except Exception as e:
-                print(f"Warning: Could not save feature cache ({e})", flush=True)
-
-    # 4. Train LightGBM Model & Predict
-    print(f"\n[3/5] Extracted features for {len(features_list):,} candidate pairs.", flush=True)
-    X_df = pd.DataFrame(features_list)
-    y_arr = np.array(labels_list)
-
-    model_save_path = os.path.join(train_dir, "lgb_model.pkl")
-    if split == "train":
-        print("\n[4/5] Training Multi-Model Ensemble (LightGBM + CatBoost + XGBoost) & Tuning Macro F0.5...", flush=True)
-        model = EntityResolutionModel()
-        
-        # Train/Val split if ground truth matches exist
-        if len(y_arr) > 0 and np.sum(y_arr) > 0:
-            groups_arr = np.array([p[0] for p in all_candidate_pairs])
-            
-            # 100% Leak-proof Grouped Validation Split (80/20)
-            unique_groups = df_s1['record_id'].astype(str).unique()
-            split_idx_group = int(len(unique_groups) * 0.8)
-            val_groups_set = set(unique_groups[split_idx_group:])
-            val_entities_list = list(unique_groups[split_idx_group:])
-            
-            is_val = np.array([g in val_groups_set for g in groups_arr])
-            
-            X_train = X_df[~is_val]
-            y_train = y_arr[~is_val]
-            
-            X_val = X_df[is_val]
-            y_val = y_arr[is_val]
-            val_groups = groups_arr[is_val]
-            val_pairs_list = [all_candidate_pairs[i] for i, iv in enumerate(is_val) if iv]
-            
-            model.train(
-                X_train, y_train, X_val, y_val,
-                val_groups=val_groups,
-                val_entities=val_entities_list,
-                val_pairs=val_pairs_list,
-                gt_map=gt_map
+    # 2. Check for Continuation Model
+    model = None
+    if continue_training or (chunk_offset > 0 and os.path.exists(model_save_path)):
+        if os.path.exists(model_save_path):
+            print(f"\n[3/5] Loading existing model checkpoint from {model_save_path} for continuation...", flush=True)
+            model = EntityResolutionModel.load(model_save_path)
+            evaluate_and_report_validation(
+                model=model, X_val=X_val, y_val=y_val,
+                val_entities_list=val_entities_list, val_pairs_list=val_pairs_list,
+                gt_map=gt_map, max_candidates=max_candidates,
+                title="BASELINE MODEL (BEFORE CHUNK TRAINING)"
             )
-            print(f"Optimal Macro F0.5 Threshold: {model.optimal_threshold:.3f}", flush=True)
-
-            # Compute and display validation Confusion Matrix
-            val_probs = model.predict_proba(X_val)
-            val_preds = (val_probs >= model.optimal_threshold).astype(int)
-            
-            tp = int(np.sum((val_preds == 1) & (y_val == 1)))
-            fp = int(np.sum((val_preds == 1) & (y_val == 0)))
-            fn = int(np.sum((val_preds == 0) & (y_val == 1)))
-            tn = int(np.sum((val_preds == 0) & (y_val == 0)))
-
-            cand_prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            cand_rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            cand_f05 = (1.25 * cand_prec * cand_rec) / (0.25 * cand_prec + cand_rec) if (0.25 * cand_prec + cand_rec) > 0 else 0.0
-
-            # OFFICIAL END-TO-END COMPETITION MACRO F0.5 (Across ALL validation entities)
-            ent_to_idx = {e: i for i, e in enumerate(val_entities_list)}
-            n_val_ents = len(val_entities_list)
-            gt_counts = np.array([len(gt_map.get(e, set())) for e in val_entities_list], dtype=float)
-            total_val_gt = int(np.sum(gt_counts))
-            val_singletons = int(np.sum(gt_counts == 0))
-            
-            pair_ents = np.array([ent_to_idx[p[0]] for p in val_pairs_list])
-            pair_is_gt = np.array([p[1] in gt_map.get(p[0], set()) for p in val_pairs_list])
-            
-            tp_pairs = (val_preds == 1) & pair_is_gt
-            fp_pairs = (val_preds == 1) & (~pair_is_gt)
-            
-            tp_g = np.bincount(pair_ents, weights=tp_pairs, minlength=n_val_ents)
-            fp_g = np.bincount(pair_ents, weights=fp_pairs, minlength=n_val_ents)
-            
-            p_den = tp_g + fp_g
-            e2e_prec_g = np.divide(tp_g, p_den, out=np.zeros_like(tp_g, dtype=float), where=p_den != 0)
-            e2e_rec_g = np.divide(tp_g, gt_counts, out=np.zeros_like(tp_g, dtype=float), where=gt_counts != 0)
-            
-            f_den = 0.25 * e2e_prec_g + e2e_rec_g
-            f05_g = np.divide(1.25 * e2e_prec_g * e2e_rec_g, f_den, out=np.zeros_like(e2e_prec_g), where=f_den != 0)
-            
-            # Official competition singleton rules:
-            # - Correct empty list prediction on singleton scores 1.0
-            # - Any false prediction on singleton scores 0.0
-            singleton_mask = (gt_counts == 0)
-            correct_singletons = int(np.sum(singleton_mask & (fp_g == 0)))
-            false_singletons = int(np.sum(singleton_mask & (fp_g > 0)))
-            f05_g[singleton_mask & (fp_g == 0)] = 1.0
-            f05_g[singleton_mask & (fp_g > 0)] = 0.0
-            
-            competition_macro_f05 = float(np.mean(f05_g))
-            retrieved_in_pool = int(np.sum(y_val))
-            blocking_recall = (retrieved_in_pool / total_val_gt * 100) if total_val_gt > 0 else 100.0
-
-            print("\n" + "=" * 65, flush=True)
-            print("       VALIDATION AUDIT & COMPETITION METRICS REPORT       ", flush=True)
-            print("=" * 65, flush=True)
-            print("  --- 1. Validation Cohort & Stage 1 Retrieval ---", flush=True)
-            print(f"  Holdout S1 Entities       : {n_val_ents:,} (100% leak-proof grouped)", flush=True)
-            print(f"  Total Ground Truth Matches: {total_val_gt:,}", flush=True)
-            print(f"  True Singletons in GT     : {val_singletons:,} ({val_singletons/n_val_ents*100:.1f}%)", flush=True)
-            print(f"  Stage 1 Candidates Formed : {len(y_val):,} pairs", flush=True)
-            print(f"  Stage 1 Candidate Recall  : {blocking_recall:.2f}% ({retrieved_in_pool:,} / {total_val_gt:,} true matches in top-{max_candidates})", flush=True)
-            print("-" * 65, flush=True)
-            print("  --- 2. Pairwise Classifier Diagnostics (Conditional on Retrieval) ---", flush=True)
-            print(f"  Optimal Decision Threshold: {model.optimal_threshold:.3f}", flush=True)
-            print(f"  Candidate True Positives  : {tp:,}", flush=True)
-            print(f"  Candidate False Positives : {fp:,}", flush=True)
-            print(f"  Candidate False Negatives : {fn:,}", flush=True)
-            print(f"  Candidate True Negatives  : {tn:,}", flush=True)
-            print(f"  Pairwise Precision        : {cand_prec * 100:.2f}%", flush=True)
-            print(f"  Pairwise Recall (on cands): {cand_rec * 100:.2f}%", flush=True)
-            print(f"  Pairwise F0.5 (on cands)  : {cand_f05:.4f}", flush=True)
-            print("-" * 65, flush=True)
-            print("  --- 3. OFFICIAL END-TO-END COMPETITION LEADERBOARD METRIC ---", flush=True)
-            print(f"  Correct Singletons (1.0)  : {correct_singletons:,} / {val_singletons:,}", flush=True)
-            print(f"  False Merges on Singletons: {false_singletons:,} / {val_singletons:,}", flush=True)
-            print(f"  End-to-End True Positives : {int(np.sum(tp_g)):,} / {total_val_gt:,} total matches", flush=True)
-            print(f"  >>> COMPETITION MACRO F0.5: {competition_macro_f05:.4f} <<< [OFFICIAL SCORER EQUIVALENT]", flush=True)
-            print("=" * 65 + "\n", flush=True)
-
-            model.val_metrics = {
-                "tn": int(tn),
-                "fp": int(fp),
-                "fn": int(fn),
-                "tp": int(tp),
-                "cand_prec": float(cand_prec),
-                "cand_rec": float(cand_rec),
-                "cand_f05": float(cand_f05),
-                "blocking_recall": float(blocking_recall),
-                "macro_f05": float(competition_macro_f05),
-                "threshold": float(model.optimal_threshold)
-            }
-
         else:
-            model.train(X_df, y_arr)
-        
-        # Persist trained model to disk
+            print(f"\n[3/5] Note: Model file {model_save_path} not found. Starting new model from scratch.", flush=True)
+
+    # 3. Multi-Chunk Training Loop
+    chunk_metrics_history = []
+
+    for chunk_idx in range(num_chunks):
+        current_offset = chunk_offset + chunk_idx * effective_chunk_size
+        chunk_title = f"CHUNK {chunk_idx + 1} / {num_chunks} (Offset: {current_offset:,} | Size: {effective_chunk_size:,})"
+        print("\n" + "=" * 70, flush=True)
+        print(f"   TRAINING {chunk_title}   ", flush=True)
+        print("=" * 70, flush=True)
+
+        # Load chunk slice
+        if current_offset > 0:
+            df_chunk = pd.read_csv(s1_path, sep="\t", skiprows=range(1, current_offset + 1), nrows=effective_chunk_size)
+        else:
+            df_chunk = pd.read_csv(s1_path, sep="\t", nrows=effective_chunk_size)
+
+        rename_dict = {}
+        if "entity_id" in df_chunk.columns: rename_dict["entity_id"] = "record_id"
+        if "business_name" in df_chunk.columns: rename_dict["business_name"] = "name"
+        if "business_address" in df_chunk.columns: rename_dict["business_address"] = "address"
+        if rename_dict:
+            df_chunk = df_chunk.rename(columns=rename_dict)
+
+        # 100% Leak-Proof Guarantee: Exclude any record belonging to the locked validation benchmark
+        df_chunk = df_chunk[~df_chunk["record_id"].astype(str).isin(val_entities_set)].copy()
+        s1_records = df_chunk.to_dict("records")
+        print(f"Loaded {len(s1_records):,} Source 1 records for Chunk {chunk_idx + 1} (strictly isolated from holdout).", flush=True)
+
+        if not s1_records:
+            print(f"Warning: No valid records for Chunk {chunk_idx + 1}. Skipping...", flush=True)
+            continue
+
+        # Multiprocessing Candidate Retrieval & Pairwise Feature Extraction
+        chunks = [s1_records[i:i + 250] for i in range(0, len(s1_records), 250)]
+        s1_id_set = {str(r["record_id"]) for r in s1_records}
+        relevant_gt = {k: v for k, v in gt_map.items() if k in s1_id_set}
+
+        candidates_map = {}
+        all_candidate_pairs = []
+        features_list = []
+        labels_list = []
+
+        start_time = time.time()
+        processed_count = 0
+        print(f"Extracting features with {num_workers} parallel workers across {len(chunks):,} chunks...", flush=True)
+        with mp.Pool(
+            processes=num_workers,
+            initializer=_init_train_worker,
+            initargs=(db_path, dataset_base, max_candidates, relevant_gt)
+        ) as pool:
+            for c_cands, c_pairs, c_feats, c_labels in pool.imap(_process_train_chunk, chunks, chunksize=1):
+                candidates_map.update(c_cands)
+                all_candidate_pairs.extend(c_pairs)
+                features_list.extend(c_feats)
+                labels_list.extend(c_labels)
+                processed_count += len(c_cands)
+
+                if processed_count % 1000 == 0 or processed_count == len(s1_records) or len(s1_records) <= 2000:
+                    elapsed = time.time() - start_time
+                    pct = processed_count / len(s1_records) * 100
+                    rate = processed_count / elapsed if elapsed > 0 else 0
+                    eta = (len(s1_records) - processed_count) / rate if rate > 0 else 0
+                    print(f"  [{pct:5.1f}%] Processed {processed_count:,} / {len(s1_records):,} entities ({rate:.0f} ent/s | ETA: {eta:.0f}s)", flush=True)
+
+        X_train = pd.DataFrame(features_list)
+        y_train = np.array(labels_list)
+        print(f"Extracted {len(features_list):,} candidate pair features for Chunk {chunk_idx + 1}.", flush=True)
+
+        is_continuation = (model is not None)
+        if model is None:
+            model = EntityResolutionModel()
+
+        print(f"\nFitting ensemble (continuation={is_continuation}, trees_per_chunk={trees_per_chunk})...", flush=True)
+        model.train(
+            X_train, y_train,
+            X_val=X_val, y_val=y_val,
+            val_entities=val_entities_list,
+            val_pairs=val_pairs_list,
+            gt_map=gt_map,
+            is_continuation=is_continuation,
+            trees_per_chunk=trees_per_chunk
+        )
+
+        metrics = evaluate_and_report_validation(
+            model=model, X_val=X_val, y_val=y_val,
+            val_entities_list=val_entities_list, val_pairs_list=val_pairs_list,
+            gt_map=gt_map, max_candidates=max_candidates,
+            title=f"CHUNK {chunk_idx + 1} / {num_chunks} VALIDATION AUDIT (OFFSET {current_offset:,})"
+        )
+        chunk_metrics_history.append((chunk_idx + 1, current_offset, metrics["macro_f05"]))
+
+        # Persist checkpoint to disk
         model.save(model_save_path)
         try:
             model.save("output/lgb_model.pkl")
         except Exception:
             pass
 
-        # Generate pairwise predictions on train sample
-        preds = model.predict(X_df)
+        # Explicitly free memory per chunk
+        del df_chunk, s1_records, chunks, s1_id_set, relevant_gt, candidates_map, all_candidate_pairs, features_list, labels_list, X_train, y_train
+        gc.collect()
 
-        for (s1_id, cand_id), pred in zip(all_candidate_pairs, preds):
-            if pred == 1:
-                results_map[s1_id].append(cand_id)
-
-        # Output train matching results
-        print(f"\n[5/5] Saving final matching outputs for training set to {cand_out_path} and {match_out_path}...", flush=True)
-        save_candidate_pairs(candidates_map, output_path=cand_out_path)
-        save_matching_results(results_map, output_path=match_out_path)
-        print("Note: Official submission validator is designed for the 'test' split. Skipping for 'train'.", flush=True)
+    print("\n" + "=" * 65, flush=True)
+    print("       MULTI-CHUNK CONTINUAL TRAINING COMPLETE       ", flush=True)
+    print("=" * 65, flush=True)
+    print("Progression of Official Competition Macro F0.5 on Fixed Holdout Benchmark:")
+    for c_num, c_off, m_f05 in chunk_metrics_history:
+        print(f"  Chunk {c_num} (Offset {c_off:,}): Macro F0.5 = {m_f05:.4f}", flush=True)
+    print(f"\nFinal model successfully saved to {model_save_path} and output/lgb_model.pkl")
+    print("=" * 65 + "\n", flush=True)
 
 if __name__ == "__main__":
     args = parse_args()
@@ -663,5 +701,11 @@ if __name__ == "__main__":
         split=args.split,
         no_cache=args.no_cache,
         db_path_arg=args.db_path,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        num_chunks=args.num_chunks,
+        chunk_size=args.chunk_size,
+        chunk_offset=args.chunk_offset,
+        val_size=args.val_size,
+        trees_per_chunk=args.trees_per_chunk,
+        continue_training=args.continue_training
     )

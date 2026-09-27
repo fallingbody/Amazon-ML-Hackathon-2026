@@ -58,26 +58,48 @@ class EntityResolutionModel:
         self.optimal_threshold = 0.5
         self.val_metrics = {}
 
-    def train(self, X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame = None, y_val: pd.Series = None, val_groups: np.ndarray = None, val_entities: List[str] = None, val_pairs: List[Any] = None, gt_map: Dict[str, Set[str]] = None):
-        """Trains LightGBM (and optional CatBoost & XGBoost) on pair features with early stopping."""
+    def train(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        X_val: pd.DataFrame = None,
+        y_val: pd.Series = None,
+        val_groups: np.ndarray = None,
+        val_entities: List[str] = None,
+        val_pairs: List[Any] = None,
+        gt_map: Dict[str, Set[str]] = None,
+        is_continuation: bool = False,
+        trees_per_chunk: int = None
+    ):
+        """Trains LightGBM (and optional CatBoost & XGBoost) on pair features with early stopping and continuation support."""
+        prev_lgb = getattr(self.clf, "booster_", None) if is_continuation else None
+        prev_cb = getattr(self, "cb_clf", None) if is_continuation else None
+        prev_xgb = self.xgb_clf.get_booster() if (is_continuation and getattr(self, "xgb_clf", None) and hasattr(self.xgb_clf, "get_booster")) else None
+
         # 1. Train LightGBM
+        n_est = trees_per_chunk if trees_per_chunk else self.params.get("n_estimators", 300)
+        lgb_params = dict(self.params)
+        lgb_params["n_estimators"] = n_est
+
         def _fit_lgb():
+            self.clf = lgb.LGBMClassifier(**lgb_params)
+            fit_kwargs = {"init_model": prev_lgb} if (is_continuation and prev_lgb) else {}
             if X_val is not None and y_val is not None:
                 self.clf.fit(
                     X_train, y_train,
                     eval_set=[(X_val, y_val)],
-                    callbacks=[lgb.early_stopping(50, verbose=False)]
+                    callbacks=[lgb.early_stopping(30, verbose=False)],
+                    **fit_kwargs
                 )
             else:
-                self.clf.fit(X_train, y_train)
+                self.clf.fit(X_train, y_train, **fit_kwargs)
 
         try:
             _fit_lgb()
         except lgb.basic.LightGBMError as e:
             if "OpenCL" in str(e) or "GPU" in str(e) or "gpu" in str(e):
                 print("\n[Notice] Falling back LightGBM to CPU...", flush=True)
-                self.params["device"] = "cpu"
-                self.clf = lgb.LGBMClassifier(**self.params)
+                lgb_params["device"] = "cpu"
                 _fit_lgb()
             else:
                 raise e
@@ -85,9 +107,10 @@ class EntityResolutionModel:
         # 2. Train CatBoost (if available)
         if HAS_CATBOOST:
             try:
-                print("Training CatBoost Classifier for Multi-Model Stacking...", flush=True)
+                cb_iters = trees_per_chunk if trees_per_chunk else 300
+                cb_fit_kwargs = {"init_model": prev_cb} if (is_continuation and prev_cb) else {}
                 self.cb_clf = cb.CatBoostClassifier(
-                    iterations=300,
+                    iterations=cb_iters,
                     learning_rate=0.06,
                     depth=6,
                     loss_function="Logloss",
@@ -97,20 +120,22 @@ class EntityResolutionModel:
                     thread_count=-1
                 )
                 if X_val is not None and y_val is not None:
-                    self.cb_clf.fit(X_train, y_train, eval_set=(X_val, y_val), early_stopping_rounds=30, verbose=False)
+                    self.cb_clf.fit(X_train, y_train, eval_set=(X_val, y_val), early_stopping_rounds=30, verbose=False, **cb_fit_kwargs)
                 else:
-                    self.cb_clf.fit(X_train, y_train, verbose=False)
-                print("CatBoost trained successfully.", flush=True)
+                    self.cb_clf.fit(X_train, y_train, verbose=False, **cb_fit_kwargs)
+                print(f"CatBoost trained successfully (trees: {self.cb_clf.tree_count_}).", flush=True)
             except Exception as e:
                 print(f"[Notice] CatBoost training skipped ({e})", flush=True)
-                self.cb_clf = None
+                if not is_continuation:
+                    self.cb_clf = None
 
         # 3. Train XGBoost (if available)
         if HAS_XGBOOST:
             try:
-                print("Training XGBoost Classifier for Multi-Model Stacking...", flush=True)
+                xgb_n_est = trees_per_chunk if trees_per_chunk else 300
+                xgb_fit_kwargs = {"xgb_model": prev_xgb} if (is_continuation and prev_xgb) else {}
                 self.xgb_clf = xgb.XGBClassifier(
-                    n_estimators=300,
+                    n_estimators=xgb_n_est,
                     learning_rate=0.06,
                     max_depth=6,
                     eval_metric="logloss",
@@ -118,13 +143,14 @@ class EntityResolutionModel:
                     random_state=42
                 )
                 if X_val is not None and y_val is not None:
-                    self.xgb_clf.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+                    self.xgb_clf.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False, **xgb_fit_kwargs)
                 else:
-                    self.xgb_clf.fit(X_train, y_train, verbose=False)
+                    self.xgb_clf.fit(X_train, y_train, verbose=False, **xgb_fit_kwargs)
                 print("XGBoost trained successfully.", flush=True)
             except Exception as e:
                 print(f"[Notice] XGBoost training skipped ({e})", flush=True)
-                self.xgb_clf = None
+                if not is_continuation:
+                    self.xgb_clf = None
 
         # 4. Tune Macro F0.5 Threshold on Ensembled Validation Probabilities
         if X_val is not None and y_val is not None:
