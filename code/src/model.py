@@ -177,7 +177,10 @@ class EntityResolutionModel:
 
         # CatBoost
         if self.cb_clf is not None:
-            p_cb = self.cb_clf.predict_proba(X)[:, 1]
+            try:
+                p_cb = self.cb_clf.predict_proba(X, thread_count=1)[:, 1]
+            except Exception:
+                p_cb = self.cb_clf.predict_proba(X)[:, 1]
             preds.append(p_cb)
             weights.append(0.30)
 

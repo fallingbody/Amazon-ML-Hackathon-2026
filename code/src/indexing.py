@@ -76,10 +76,12 @@ class CandidateIndexer:
             dirname = os.path.dirname(self.db_path)
             if dirname:
                 os.makedirs(dirname, exist_ok=True)
-            self._conn = sqlite3.connect(f"file:{self.db_path}?mode=ro" if os.path.exists(self.db_path) else self.db_path, uri=True if os.path.exists(self.db_path) else False)
+            db_uri = f"file:{self.db_path}?mode=ro&immutable=1" if os.path.exists(self.db_path) else self.db_path
+            self._conn = sqlite3.connect(db_uri, uri=True if os.path.exists(self.db_path) else False)
             cursor = self._conn.cursor()
             cursor.execute("PRAGMA cache_size = -64000")
             cursor.execute("PRAGMA temp_store = MEMORY")
+            cursor.execute("PRAGMA mmap_size = 10737418240")
             try:
                 cursor.execute("PRAGMA table_info(token_index)")
                 cols = [row[1] for row in cursor.fetchall()]

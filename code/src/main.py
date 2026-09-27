@@ -52,11 +52,24 @@ def _init_test_worker(db_path: str, model_path: str, dataset_base: str, max_cand
     _WORKER_INDEXER._records_dict = None  # Pure Zero-RAM disk mode via SQLite Primary Key
     _WORKER_INDEXER.get_frequent_tokens()
     _WORKER_MODEL = EntityResolutionModel.load(model_path)
+    if hasattr(_WORKER_MODEL, "cb_clf") and _WORKER_MODEL.cb_clf is not None:
+        try:
+            _WORKER_MODEL.cb_clf.set_params(thread_count=1)
+        except Exception:
+            pass
+    if hasattr(_WORKER_MODEL, "xgb_clf") and _WORKER_MODEL.xgb_clf is not None:
+        try:
+            _WORKER_MODEL.xgb_clf.set_params(n_jobs=1)
+        except Exception:
+            pass
     _WORKER_MAX_CANDS = max_candidates
 
 def _process_test_chunk(chunk_s1: list) -> tuple:
     cand_lines = []
-    match_lines = []
+    chunk_pair_info = []  # list of (s1_id, cid)
+    chunk_features = []
+    s1_results = {str(rec["record_id"]): [] for rec in chunk_s1}
+
     for s1_rec in chunk_s1:
         s1_id = str(s1_rec["record_id"])
         s1_country = str(s1_rec.get("country", "")).strip().lower()
@@ -68,26 +81,24 @@ def _process_test_chunk(chunk_s1: list) -> tuple:
         ))
         cand_lines.append(f"{s1_id}\t{','.join(cand_ids)}\n")
         if not cand_ids:
-            match_lines.append(f"{s1_id}\t\n")
             continue
         cand_records = _WORKER_INDEXER.fetch_records_by_ids(cand_ids, split="test")
         s1_precomputed = precompute_s1_features(s1_rec)
-        batch_pairs = []
-        batch_features = []
         for cand_rec in cand_records:
             cid = str(cand_rec["record_id"])
             c2_country = str(cand_rec.get("country", "")).strip().lower()
             if s1_country and c2_country and s1_country != c2_country:
                 continue
-            batch_pairs.append(cid)
-            batch_features.append(compute_pair_features(s1_rec, cand_rec, s1_precomputed))
-        matches = []
-        if batch_features:
-            preds = _WORKER_MODEL.predict(pd.DataFrame(batch_features))
-            for cid, pred in zip(batch_pairs, preds):
-                if pred == 1:
-                    matches.append(cid)
-        match_lines.append(f"{s1_id}\t{','.join(matches)}\n")
+            chunk_pair_info.append((s1_id, cid))
+            chunk_features.append(compute_pair_features(s1_rec, cand_rec, s1_precomputed))
+
+    if chunk_features:
+        preds = _WORKER_MODEL.predict(pd.DataFrame(chunk_features))
+        for (s1_id, cid), pred in zip(chunk_pair_info, preds):
+            if pred == 1:
+                s1_results[s1_id].append(cid)
+
+    match_lines = [f"{s1_id}\t{','.join(s1_results[s1_id])}\n" for s1_rec in chunk_s1 for s1_id in [str(s1_rec["record_id"])]]
     return cand_lines, match_lines
 
 _WORKER_GT_MAP = None
