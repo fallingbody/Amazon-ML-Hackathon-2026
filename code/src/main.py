@@ -678,6 +678,7 @@ def run_pipeline(
             title=f"CHUNK {chunk_idx + 1} / {num_chunks} VALIDATION AUDIT (OFFSET {current_offset:,})"
         )
         chunk_metrics_history.append((chunk_idx + 1, current_offset, metrics["macro_f05"]))
+        model.val_metrics = metrics
 
         # Persist checkpoint to disk (wrapped for disk-full safety)
         try:
