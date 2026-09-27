@@ -360,12 +360,13 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 40, split: str 
             loaded_from_cache = False
 
     if not loaded_from_cache:
-        print(f"\n[2/5] Initializing Zero-RAM SQLite Disk Index ({split.upper()} set)...", flush=True)
+        print(f"\n[2/5] Initializing Pure Zero-RAM SQLite Disk Index ({split.upper()} set)...", flush=True)
         indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split=split)
-        indexer.load_records_dict()
+        indexer._records_dict = None  # Pure Zero-RAM disk mode via SQLite Primary Key
         
         print("Pre-caching frequent tokens to accelerate searches...", flush=True)
         indexer.get_frequent_tokens()
+
 
         print(f"\nQuerying SQLite B-Tree index and building feature vectors (max_candidates={max_candidates})...", flush=True)
         s1_records = df_s1.to_dict("records")
@@ -453,6 +454,7 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 40, split: str 
             unique_groups = df_s1['record_id'].astype(str).unique()
             split_idx_group = int(len(unique_groups) * 0.8)
             val_groups_set = set(unique_groups[split_idx_group:])
+            val_entities_list = list(unique_groups[split_idx_group:])
             
             is_val = np.array([g in val_groups_set for g in groups_arr])
             
@@ -462,8 +464,15 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 40, split: str 
             X_val = X_df[is_val]
             y_val = y_arr[is_val]
             val_groups = groups_arr[is_val]
+            val_pairs_list = [all_candidate_pairs[i] for i, iv in enumerate(is_val) if iv]
             
-            model.train(X_train, y_train, X_val, y_val, val_groups=val_groups)
+            model.train(
+                X_train, y_train, X_val, y_val,
+                val_groups=val_groups,
+                val_entities=val_entities_list,
+                val_pairs=val_pairs_list,
+                gt_map=gt_map
+            )
             print(f"Optimal Macro F0.5 Threshold: {model.optimal_threshold:.3f}", flush=True)
 
             # Compute and display validation Confusion Matrix
@@ -475,56 +484,86 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 40, split: str 
             fn = int(np.sum((val_preds == 0) & (y_val == 1)))
             tn = int(np.sum((val_preds == 0) & (y_val == 0)))
 
-            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            pairwise_f05 = (1.25 * prec * rec) / (0.25 * prec + rec) if (0.25 * prec + rec) > 0 else 0.0
-            pairwise_f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+            cand_prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            cand_rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            cand_f05 = (1.25 * cand_prec * cand_rec) / (0.25 * cand_prec + cand_rec) if (0.25 * cand_prec + cand_rec) > 0 else 0.0
 
-            # Entity-Level Macro F0.5 (Official Competition Metric)
-            _, g_idx = np.unique(val_groups, return_inverse=True)
-            n_val_groups = len(np.unique(g_idx))
-            tp_g = np.bincount(g_idx, weights=(val_preds == 1) & (y_val == 1), minlength=n_val_groups)
-            fp_g = np.bincount(g_idx, weights=(val_preds == 1) & (y_val == 0), minlength=n_val_groups)
-            fn_g = np.bincount(g_idx, weights=(val_preds == 0) & (y_val == 1), minlength=n_val_groups)
+            # OFFICIAL END-TO-END COMPETITION MACRO F0.5 (Across ALL validation entities)
+            ent_to_idx = {e: i for i, e in enumerate(val_entities_list)}
+            n_val_ents = len(val_entities_list)
+            gt_counts = np.array([len(gt_map.get(e, set())) for e in val_entities_list], dtype=float)
+            total_val_gt = int(np.sum(gt_counts))
+            val_singletons = int(np.sum(gt_counts == 0))
+            
+            pair_ents = np.array([ent_to_idx[p[0]] for p in val_pairs_list])
+            pair_is_gt = np.array([p[1] in gt_map.get(p[0], set()) for p in val_pairs_list])
+            
+            tp_pairs = (val_preds == 1) & pair_is_gt
+            fp_pairs = (val_preds == 1) & (~pair_is_gt)
+            
+            tp_g = np.bincount(pair_ents, weights=tp_pairs, minlength=n_val_ents)
+            fp_g = np.bincount(pair_ents, weights=fp_pairs, minlength=n_val_ents)
+            
             p_den = tp_g + fp_g
-            r_den = tp_g + fn_g
-            prec_g = np.divide(tp_g, p_den, out=np.zeros_like(tp_g, dtype=float), where=p_den != 0)
-            rec_g = np.divide(tp_g, r_den, out=np.zeros_like(tp_g, dtype=float), where=r_den != 0)
-            f_den = 0.25 * prec_g + rec_g
-            f05_g = np.divide(1.25 * prec_g * rec_g, f_den, out=np.zeros_like(prec_g), where=f_den != 0)
-            f05_g[(tp_g == 0) & (fp_g == 0) & (fn_g == 0)] = 1.0
+            e2e_prec_g = np.divide(tp_g, p_den, out=np.zeros_like(tp_g, dtype=float), where=p_den != 0)
+            e2e_rec_g = np.divide(tp_g, gt_counts, out=np.zeros_like(tp_g, dtype=float), where=gt_counts != 0)
+            
+            f_den = 0.25 * e2e_prec_g + e2e_rec_g
+            f05_g = np.divide(1.25 * e2e_prec_g * e2e_rec_g, f_den, out=np.zeros_like(e2e_prec_g), where=f_den != 0)
+            
+            # Official competition singleton rules:
+            # - Correct empty list prediction on singleton scores 1.0
+            # - Any false prediction on singleton scores 0.0
+            singleton_mask = (gt_counts == 0)
+            correct_singletons = int(np.sum(singleton_mask & (fp_g == 0)))
+            false_singletons = int(np.sum(singleton_mask & (fp_g > 0)))
+            f05_g[singleton_mask & (fp_g == 0)] = 1.0
+            f05_g[singleton_mask & (fp_g > 0)] = 0.0
+            
             competition_macro_f05 = float(np.mean(f05_g))
+            retrieved_in_pool = int(np.sum(y_val))
+            blocking_recall = (retrieved_in_pool / total_val_gt * 100) if total_val_gt > 0 else 100.0
 
-            print("\n" + "=" * 55, flush=True)
-            print("   VALIDATION SET CONFUSION MATRIX & METRICS   ", flush=True)
-            print("=" * 55, flush=True)
-            print(f"  Total Validation Pairs : {len(y_val):,}", flush=True)
-            print(f"  Unique S1 Val Entities : {n_val_groups:,}", flush=True)
-            print(f"  Optimal Threshold      : {model.optimal_threshold:.3f}", flush=True)
-            print(f"  True Positives  (TP)   : {tp:,}  (Correct matches)", flush=True)
-            print(f"  False Positives (FP)   : {fp:,}  (Incorrect predictions)", flush=True)
-            print(f"  False Negatives (FN)   : {fn:,}  (Missed true matches)", flush=True)
-            print(f"  True Negatives  (TN)   : {tn:,}  (Correct non-matches)", flush=True)
-            print("-" * 55, flush=True)
-            print(f"  Pairwise Precision     : {prec * 100:.2f}%", flush=True)
-            print(f"  Pairwise Recall        : {rec * 100:.2f}%", flush=True)
-            print(f"  Pairwise F1-Score      : {pairwise_f1:.4f}", flush=True)
-            print(f"  Pairwise F0.5          : {pairwise_f05:.4f}", flush=True)
-            print(f"  Competition Macro F0.5 : {competition_macro_f05:.4f}  [LEADERBOARD METRIC]", flush=True)
-            print("=" * 55 + "\n", flush=True)
+            print("\n" + "=" * 65, flush=True)
+            print("       VALIDATION AUDIT & COMPETITION METRICS REPORT       ", flush=True)
+            print("=" * 65, flush=True)
+            print("  --- 1. Validation Cohort & Stage 1 Retrieval ---", flush=True)
+            print(f"  Holdout S1 Entities       : {n_val_ents:,} (100% leak-proof grouped)", flush=True)
+            print(f"  Total Ground Truth Matches: {total_val_gt:,}", flush=True)
+            print(f"  True Singletons in GT     : {val_singletons:,} ({val_singletons/n_val_ents*100:.1f}%)", flush=True)
+            print(f"  Stage 1 Candidates Formed : {len(y_val):,} pairs", flush=True)
+            print(f"  Stage 1 Candidate Recall  : {blocking_recall:.2f}% ({retrieved_in_pool:,} / {total_val_gt:,} true matches in top-{max_candidates})", flush=True)
+            print("-" * 65, flush=True)
+            print("  --- 2. Pairwise Classifier Diagnostics (Conditional on Retrieval) ---", flush=True)
+            print(f"  Optimal Decision Threshold: {model.optimal_threshold:.3f}", flush=True)
+            print(f"  Candidate True Positives  : {tp:,}", flush=True)
+            print(f"  Candidate False Positives : {fp:,}", flush=True)
+            print(f"  Candidate False Negatives : {fn:,}", flush=True)
+            print(f"  Candidate True Negatives  : {tn:,}", flush=True)
+            print(f"  Pairwise Precision        : {cand_prec * 100:.2f}%", flush=True)
+            print(f"  Pairwise Recall (on cands): {cand_rec * 100:.2f}%", flush=True)
+            print(f"  Pairwise F0.5 (on cands)  : {cand_f05:.4f}", flush=True)
+            print("-" * 65, flush=True)
+            print("  --- 3. OFFICIAL END-TO-END COMPETITION LEADERBOARD METRIC ---", flush=True)
+            print(f"  Correct Singletons (1.0)  : {correct_singletons:,} / {val_singletons:,}", flush=True)
+            print(f"  False Merges on Singletons: {false_singletons:,} / {val_singletons:,}", flush=True)
+            print(f"  End-to-End True Positives : {int(np.sum(tp_g)):,} / {total_val_gt:,} total matches", flush=True)
+            print(f"  >>> COMPETITION MACRO F0.5: {competition_macro_f05:.4f} <<< [OFFICIAL SCORER EQUIVALENT]", flush=True)
+            print("=" * 65 + "\n", flush=True)
 
             model.val_metrics = {
                 "tn": int(tn),
                 "fp": int(fp),
                 "fn": int(fn),
                 "tp": int(tp),
-                "prec": float(prec),
-                "rec": float(rec),
-                "f1": float(pairwise_f1),
-                "f05": float(pairwise_f05),
+                "cand_prec": float(cand_prec),
+                "cand_rec": float(cand_rec),
+                "cand_f05": float(cand_f05),
+                "blocking_recall": float(blocking_recall),
                 "macro_f05": float(competition_macro_f05),
                 "threshold": float(model.optimal_threshold)
             }
+
         else:
             model.train(X_df, y_arr)
         

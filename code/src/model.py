@@ -8,7 +8,7 @@ import pickle
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Set
 
 try:
     import catboost as cb
@@ -58,7 +58,7 @@ class EntityResolutionModel:
         self.optimal_threshold = 0.5
         self.val_metrics = {}
 
-    def train(self, X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame = None, y_val: pd.Series = None, val_groups: np.ndarray = None):
+    def train(self, X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame = None, y_val: pd.Series = None, val_groups: np.ndarray = None, val_entities: List[str] = None, val_pairs: List[Any] = None, gt_map: Dict[str, Set[str]] = None):
         """Trains LightGBM (and optional CatBoost & XGBoost) on pair features with early stopping."""
         # 1. Train LightGBM
         def _fit_lgb():
@@ -129,7 +129,11 @@ class EntityResolutionModel:
         # 4. Tune Macro F0.5 Threshold on Ensembled Validation Probabilities
         if X_val is not None and y_val is not None:
             val_probs = self.predict_proba(X_val)
-            self.optimal_threshold = self.optimize_f05_threshold(y_val, val_probs, groups=val_groups)
+            if val_entities is not None and val_pairs is not None and gt_map is not None:
+                self.optimal_threshold = self.optimize_end_to_end_f05(val_entities, val_pairs, val_probs, gt_map)
+            else:
+                self.optimal_threshold = self.optimize_f05_threshold(y_val, val_probs, groups=val_groups)
+
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         """Returns ensemble blend of match probabilities across available models."""
@@ -168,7 +172,56 @@ class EntityResolutionModel:
         probs = self.predict_proba(X)
         return (probs >= thresh).astype(int)
 
+    def optimize_end_to_end_f05(self, val_entities: List[str], val_pairs: List[Any], probs: np.ndarray, gt_map: Dict[str, Set[str]]) -> float:
+        """
+        Directly optimizes probability threshold to maximize the OFFICIAL Competition Macro F0.5 Metric:
+        - Computed per Source 1 entity across ALL validation entities (including singletons and missed candidates).
+        - Correctly identified singletons (GT=0, Pred=0) receive 1.0.
+        - False merges on singletons (GT=0, Pred>0) receive 0.0.
+        - Missed blocking candidates are counted in Recall = TP / |GT|.
+        """
+        ent_to_idx = {e: i for i, e in enumerate(val_entities)}
+        n_ents = len(val_entities)
+        gt_counts = np.array([len(gt_map.get(e, set())) for e in val_entities], dtype=float)
+
+        if len(val_pairs) == 0:
+            return 0.5
+
+        pair_ents = np.array([ent_to_idx[p[0]] for p in val_pairs])
+        pair_is_gt = np.array([p[1] in gt_map.get(p[0], set()) for p in val_pairs])
+
+        best_thresh = 0.5
+        best_macro = 0.0
+
+        for thresh in np.linspace(0.2, 0.85, 131):
+            mask = (probs >= thresh)
+            tp_pairs = mask & pair_is_gt
+            fp_pairs = mask & (~pair_is_gt)
+
+            tp_g = np.bincount(pair_ents, weights=tp_pairs, minlength=n_ents)
+            fp_g = np.bincount(pair_ents, weights=fp_pairs, minlength=n_ents)
+
+            p_den = tp_g + fp_g
+            prec_g = np.divide(tp_g, p_den, out=np.zeros_like(tp_g, dtype=float), where=p_den != 0)
+            rec_g = np.divide(tp_g, gt_counts, out=np.zeros_like(tp_g, dtype=float), where=gt_counts != 0)
+
+            f_den = 0.25 * prec_g + rec_g
+            f05_g = np.divide(1.25 * prec_g * rec_g, f_den, out=np.zeros_like(prec_g), where=f_den != 0)
+
+            # Official Competition Singleton Rule
+            singleton_mask = (gt_counts == 0)
+            f05_g[singleton_mask & (fp_g == 0)] = 1.0
+            f05_g[singleton_mask & (fp_g > 0)] = 0.0
+
+            macro_val = float(np.mean(f05_g))
+            if macro_val > best_macro:
+                best_macro = macro_val
+                best_thresh = thresh
+
+        return float(best_thresh)
+
     def optimize_f05_threshold(self, y_true: np.ndarray, probs: np.ndarray, groups: np.ndarray = None) -> float:
+
         """Finds the probability threshold that maximizes Macro F0.5 score (Official Competition Metric)."""
         best_thresh = 0.5
         best_f05 = 0.0

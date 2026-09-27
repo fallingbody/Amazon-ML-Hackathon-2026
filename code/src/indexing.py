@@ -227,10 +227,11 @@ class CandidateIndexer:
         name_words.sort(key=len, reverse=True)
         addr_words.sort(key=len, reverse=True)
 
-        query_tokens = (name_words + addr_words)[:3]
+        # Query top 3 distinctive name tokens and top 2 distinctive address tokens
+        query_tokens = name_words[:3] + addr_words[:2]
         if not query_tokens:
             all_fallback = [t for t in (clean_n + " " + clean_a).split() if len(t) >= 3]
-            query_tokens = sorted(all_fallback, key=len, reverse=True)[:2]
+            query_tokens = sorted(all_fallback, key=len, reverse=True)[:3]
 
         if not query_tokens:
             return set()
@@ -239,24 +240,31 @@ class CandidateIndexer:
         cursor = conn.cursor()
 
         # Balanced S2 / S3 Candidate Retrieval:
-        # S2 rows have lowest rowids (queried forward LIMIT 75)
-        # S3 rows have highest rowids (queried in reverse ORDER BY rowid DESC LIMIT 75)
-        # Guarantees zero S3 starvation with < 2ms per query
+        # S2 rows have lowest rowids (queried forward LIMIT 125)
+        # S3 rows have highest rowids (queried in reverse ORDER BY rowid DESC LIMIT 125)
         candidate_pool = set()
         for token in query_tokens:
             # Source 2
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 75", (token,))
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 125", (token,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
             # Source 3
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 75", (token,))
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 125", (token,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
+
+        # Building / House number auxiliary query (captures businesses with name variations at same building)
+        houses = extract_house_numbers(address)
+        for h in houses:
+            if len(h) >= 3:
+                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 60", (h,))
+                for (rec_id,) in cursor.fetchall():
+                    candidate_pool.add(rec_id)
 
         # Postal code auxiliary query (captures businesses with name typos but identical zip)
         postal = extract_postal_code(clean_a, country)
         if postal and len(postal) >= 5:
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 40", (postal,))
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 60", (postal,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
 

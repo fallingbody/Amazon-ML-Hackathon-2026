@@ -101,14 +101,14 @@ def extract_house_numbers(text: str) -> Set[str]:
     return set(RE_DIGITS.findall(text))
 
 def extract_postal_code(text: str, country: str = "") -> str:
-    """Extracts normalized 5-digit US zip or 6-digit Indian PIN code."""
+    """Extracts normalized 5-digit US/French zip or 6-digit Indian PIN code."""
     if not text or not isinstance(text, str):
         return ""
-    c = country.strip().lower()
-    if c == "in":
+    c = country.strip().lower() if country else ""
+    if c in ("in", "india"):
         m = RE_IN_PIN.findall(text)
         return m[-1] if m else ""
-    elif c == "us":
+    elif c in ("us", "usa", "united states", "fr", "france"):
         m = RE_US_ZIP.findall(text)
         return m[-1] if m else ""
     else:
@@ -119,6 +119,7 @@ def extract_postal_code(text: str, country: str = "") -> str:
         if m5:
             return m5[-1]
     return ""
+
 
 def extract_domain_category(name: str, address: str = "") -> str:
     """Classifies entity into a high-level domain (health, hospitality, education, etc.) to detect domain clashes."""
