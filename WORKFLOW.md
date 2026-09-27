@@ -223,12 +223,34 @@ source .venv/bin/activate
 pip install -r code/requirements.txt
 ```
 
-### Stage A: Training the Multi-Model Ensemble (Validation Mode)
+### Stage A: Multi-Chunk Continual Training (Scalable High-Performance Mode)
 ```bash
-python3 code/src/main.py --split train --sample-size 50000 --max-candidates 40
+# Train on 100,000 entities across 2 sequential chunks (RAM stays < 2.5 GB at all times):
+python3 code/src/main.py \
+    --split train \
+    --chunk-size 50000 \
+    --num-chunks 2 \
+    --val-size 2000 \
+    --num-workers 8 \
+    --trees-per-chunk 100
+
+# Continue training later on next slices (e.g. records 100,000 to 200,000):
+python3 code/src/main.py \
+    --split train \
+    --chunk-size 50000 \
+    --num-chunks 2 \
+    --chunk-offset 100000 \
+    --continue-training \
+    --val-size 2000 \
+    --num-workers 8 \
+    --trees-per-chunk 100
 ```
-- **Runtime**: ~15–20 minutes on an 8-core CPU.
-- **Process**: Extracts 32 features for 50,000 S1 records (and their top 40 candidates), caches extracted matrices to `output/train/cache_features_train_50000_40_v2.pkl`, trains LightGBM + CatBoost + XGBoost, finds the optimal Macro $F_{0.5}$ threshold ($\tau^*$), prints the grouped validation confusion matrix, and saves all boosters to `output/train/lgb_model.pkl`.
+- **Runtime**: ~4–5 minutes per 50k chunk with 8 parallel worker processes (~200–250 entities/sec).
+- **Process**:
+  1. **Locked Holdout Validation**: Samples and locks 2,000 entities from the tail of `train_source1.tsv` to `output/train/fixed_val_set_2000_40.pkl`. All chunks evaluate against this identical benchmark with zero data leakage.
+  2. **Multi-Chunk Warm-Start**: LightGBM, CatBoost, and XGBoost warm-start from the previous chunk (`init_model` and `xgb_model`), incrementally adding trees per chunk (e.g., 100 $\rightarrow$ 200 $\rightarrow$ 300).
+  3. **Zero RAM Accumulation**: Memory is strictly released after every chunk via `del` and `gc.collect()`, keeping RAM flat below 2.5 GB even when scaling to hundreds of thousands of records.
+  4. **True Competition Macro $F_{0.5}$ Auditing**: Every chunk evaluates and reports both candidate-level metrics and the official end-to-end competition Macro $F_{0.5}$. Model checkpoints are persisted to `output/train/lgb_model.pkl`.
 
 ### Stage B: High-Speed Multiprocess Test Streaming (Official Leaderboard Mode)
 ```bash

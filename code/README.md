@@ -51,18 +51,41 @@ Always run within the virtual environment:
 # 1. Activate virtual environment
 source .venv/bin/activate
 
-# 2. Train the Multi-Model Ensemble (on Train split)
-python3 code/src/main.py --split train --sample-size 50000 --max-candidates 40
+# 2. Multi-Chunk Continual Training (e.g. 2 chunks of 50,000 entities = 100,000 entities total)
+python3 code/src/main.py \
+    --split train \
+    --chunk-size 50000 \
+    --num-chunks 2 \
+    --val-size 2000 \
+    --num-workers 8 \
+    --trees-per-chunk 100
 
-# 3. Run High-Speed Multiprocess Test Inference (on Full Test split)
+# 3. (Optional) Resume Training on Subsequent Chunks (e.g. Chunks 3 & 4 starting at offset 100,000)
+python3 code/src/main.py \
+    --split train \
+    --chunk-size 50000 \
+    --num-chunks 2 \
+    --chunk-offset 100000 \
+    --continue-training \
+    --val-size 2000 \
+    --num-workers 8 \
+    --trees-per-chunk 100
+
+# 4. Run High-Speed Multiprocess Test Inference (on Full 1.73M Test split)
 python3 code/src/main.py --split test --sample-size 0 --num-workers 8 --max-candidates 40
 ```
 
 ### Command Arguments:
 - `--split`: Dataset split to run on (`train` or `test`).
-- `--sample-size`: Number of Source 1 records to evaluate (e.g., `50000` for training, `0` for the entire 1.73M test set).
+- `--chunk-size`: Size of each sequential training chunk (e.g., `50000` or `75000`). Overrides `--sample-size`.
+- `--num-chunks`: Number of sequential chunks to train in this execution (default `1`).
+- `--chunk-offset`: Starting row offset in `train_source1.tsv` (default `0`). Used to resume/continue training on next slices of the dataset.
+- `--continue-training`: Warm-starts training from existing `output/train/lgb_model.pkl` checkpoint, adding additional trees.
+- `--trees-per-chunk`: Number of trees added to LightGBM, CatBoost, and XGBoost per chunk (default `100`).
+- `--val-size`: Number of entities extracted from the tail of `train_source1.tsv` to lock as the fixed holdout validation benchmark (default `2000`).
+- `--sample-size`: Number of Source 1 records to evaluate (e.g., `0` for the entire 1.73M test set).
 - `--max-candidates`: Maximum top candidate records fetched per entity (default `40`).
-- `--num-workers`: Number of parallel worker processes for test streaming (default: up to 8).
+- `--num-workers`: Number of parallel worker processes for feature extraction and test streaming (default: min(8, CPU count)).
 - `--no-cache`: Force re-extraction of features, bypassing disk cache.
 
 ---
