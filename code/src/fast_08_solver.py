@@ -135,11 +135,14 @@ def _process_chunk(chunk_s1: List[Tuple[str, str, str, str]]) -> Tuple[List[str]
     return match_lines, cand_lines
 
 def main():
+    cpu_count = os.cpu_count() or 4
+    default_workers = max(1, cpu_count - 4) if cpu_count > 8 else cpu_count
+
     parser = argparse.ArgumentParser(description="Ultra-Fast In-Memory 0.80+ Matcher")
     parser.add_argument("--dataset-base", type=str, default=None)
     parser.add_argument("--split", type=str, default="test", choices=["train", "test"])
-    parser.add_argument("--num-workers", type=int, default=min(56, os.cpu_count() or 4))
-    parser.add_argument("--chunk-size", type=int, default=1500)
+    parser.add_argument("--num-workers", type=int, default=default_workers)
+    parser.add_argument("--chunk-size", type=int, default=1000)
     parser.add_argument("--threshold", type=float, default=0.38)
     parser.add_argument("--output-dir", type=str, default="output")
     args = parser.parse_args()
