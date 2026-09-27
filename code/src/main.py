@@ -138,12 +138,18 @@ def _process_train_chunk(chunk_s1: list) -> tuple:
     return chunk_cands_map, chunk_pairs, chunk_features, chunk_labels
 
 def find_dataset_base() -> str:
-    """Dynamically resolves dataset folder location across local, SageMaker, and Colab environments."""
+    """Dynamically resolves dataset folder location across local, SageMaker, submission packages, and Colab."""
     possible_paths = [
         "dataset",
+        os.path.join("..", "dataset"),
+        os.path.join("..", "..", "dataset"),
+        os.path.join("..", "..", "..", "dataset"),
         "student_resource/dataset",
+        os.path.join("..", "student_resource", "dataset"),
+        os.path.join("..", "..", "student_resource", "dataset"),
         "6ab10eb3b23ba_student_resource/student_resource/dataset",
-        "../6ab10eb3b23ba_student_resource/student_resource/dataset",
+        os.path.join("..", "6ab10eb3b23ba_student_resource", "student_resource", "dataset"),
+        os.path.join("..", "..", "6ab10eb3b23ba_student_resource", "student_resource", "dataset"),
         "/content/6ab10eb3b23ba_student_resource/student_resource/dataset",
         "/content/dataset"
     ]
@@ -153,16 +159,21 @@ def find_dataset_base() -> str:
     return "dataset"
 
 def find_db_path(split: str = "train", explicit_path: str = None) -> str:
-    """Dynamically resolves SQLite index.db location across local, SageMaker, and Colab environments."""
+    """Dynamically resolves SQLite index.db location across local, SageMaker, submission packages, and Colab."""
     if explicit_path:
         return explicit_path
     db_name = f"index_{split}.db" if split != "train" else "index.db"
     possible_paths = [
         db_name,
         os.path.join("dataset", db_name),
+        os.path.join("..", db_name),
+        os.path.join("..", "..", db_name),
+        os.path.join("..", "dataset", db_name),
+        os.path.join("..", "..", "dataset", db_name),
         f"6ab10eb3b23ba_student_resource/student_resource/{db_name}",
         f"student_resource/{db_name}",
-        f"../6ab10eb3b23ba_student_resource/student_resource/{db_name}",
+        os.path.join("..", "6ab10eb3b23ba_student_resource", "student_resource", db_name),
+        os.path.join("..", "..", "6ab10eb3b23ba_student_resource", "student_resource", db_name),
         f"/content/6ab10eb3b23ba_student_resource/student_resource/{db_name}",
         f"/content/{db_name}"
     ]
