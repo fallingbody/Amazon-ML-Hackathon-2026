@@ -392,10 +392,10 @@ def run_pipeline(
             if num_workers > 1:
                 indexer.close()  # CRITICAL: Close SQLite connection in parent before fork to avoid deadlock in workers
 
-                chunk_size = 500
-                chunks = (s1_records[i:i + chunk_size] for i in range(0, total_s1, chunk_size))
-                num_chunks = (total_s1 + chunk_size - 1) // chunk_size
-                print(f"Executing with {num_workers} parallel workers across {num_chunks:,} chunks (Pure Zero-RAM Mode)...", flush=True)
+                _test_batch_size = 500
+                _test_chunks = (s1_records[i:i + _test_batch_size] for i in range(0, total_s1, _test_batch_size))
+                _test_num_chunks = (total_s1 + _test_batch_size - 1) // _test_batch_size
+                print(f"Executing with {num_workers} parallel workers across {_test_num_chunks:,} chunks (Pure Zero-RAM Mode)...", flush=True)
 
                 processed_count = 0
                 with mp.Pool(
@@ -403,7 +403,7 @@ def run_pipeline(
                     initializer=_init_test_worker,
                     initargs=(db_path, model_load_path, dataset_base, max_candidates)
                 ) as pool:
-                    for cand_lines, match_lines in pool.imap(_process_test_chunk, chunks, chunksize=1):
+                    for cand_lines, match_lines in pool.imap(_process_test_chunk, _test_chunks, chunksize=1):
                         f_cand.writelines(cand_lines)
                         f_match.writelines(match_lines)
                         processed_count += len(cand_lines)
@@ -650,6 +650,12 @@ def run_pipeline(
         y_train = np.array(labels_list)
         print(f"Extracted {len(features_list):,} candidate pair features for Chunk {chunk_idx + 1}.", flush=True)
 
+        if len(features_list) == 0:
+            print(f"Warning: No candidate pairs extracted for Chunk {chunk_idx + 1} (all records may be singletons or unindexed). Skipping model training for this chunk.", flush=True)
+            del df_chunk, s1_records, chunks, s1_id_set, relevant_gt, candidates_map, all_candidate_pairs, features_list, labels_list, X_train, y_train
+            gc.collect()
+            continue
+
         is_continuation = (model is not None)
         if model is None:
             model = EntityResolutionModel()
@@ -673,8 +679,11 @@ def run_pipeline(
         )
         chunk_metrics_history.append((chunk_idx + 1, current_offset, metrics["macro_f05"]))
 
-        # Persist checkpoint to disk
-        model.save(model_save_path)
+        # Persist checkpoint to disk (wrapped for disk-full safety)
+        try:
+            model.save(model_save_path)
+        except OSError as e:
+            print(f"[ERROR] Could not save model to {model_save_path}: {e}. Check available disk space!", flush=True)
         try:
             model.save("output/lgb_model.pkl")
         except Exception:
