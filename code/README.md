@@ -92,21 +92,23 @@ python3 code/src/main.py --split test --sample-size 0 --num-workers 8 --max-cand
 
 ## 📊 Output Files & Submission Verification
 
-The pipeline organizes outputs into two dedicated directories:
-1. `output/train/`: Model weights (`lgb_model.pkl`), feature cache, and validation TSVs.
-2. `output/test/`: Competition submission files (`matching_results.tsv` and `candidate_pairs.tsv`).
+The pipeline writes competition submission files to `output/` (and mirrors them to `unwanted_submission/output/`):
+- `output/matching_results.tsv` (Leaderboard evaluated matches)
+- `output/candidate_pairs.tsv` (Blocking candidate pairs)
 
 ### 1. Validate Submission Format
 ```bash
 python3 code/src/validate_submission.py \
-    --matching output/test/matching_results.tsv \
-    --candidate output/test/candidate_pairs.tsv \
-    --test-dir 6ab10eb3b23ba_student_resource/student_resource/dataset/test
+    --matching output/matching_results.tsv \
+    --candidate output/candidate_pairs.tsv \
+    --test-dir dataset/test
 ```
 *(Confirms non-empty lines, tab separators, candidate pool subset constraints, and 1-to-1 entity ordering matching `test_source1.tsv`)*
 
-### 2. Package Submission:
+### 2. Package Submission Archive:
 ```bash
-zip -j submission.zip output/test/matching_results.tsv output/test/candidate_pairs.tsv
+python3 package_submission.py
+# Or manually:
+zip -r unwanted_submission.zip output code Documentation_template.md
 ```
 

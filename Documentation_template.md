@@ -1,6 +1,6 @@
 # ML Challenge 2026: Business Entity Resolution Solution Documentation
 
-**Team Name:** Antigravity ML  
+**Team Name:** unwanted  
 **Submission Date:** September 2026  
 **Competition Metric:** Macro $F_{0.5}$ (Leaderboard Evaluated)
 
@@ -157,15 +157,15 @@ source .venv/bin/activate
 # 2. Train the Multi-Model Ensemble (50,000 training entities)
 python3 code/src/main.py --split train --sample-size 50000 --max-candidates 40
 
-# 3. Stream Full Test Predictions (1.73M entities, 8 workers, Zero-RAM)
-python3 code/src/main.py --split test --sample-size 0 --num-workers 8 --max-candidates 40
+# 3. Stream Full Test Predictions (1.73M entities, Zero-RAM)
+python3 code/src/main.py --split test --sample-size 0 --num-workers 36 --max-candidates 180 --output-dir output/
 
 # 4. Verify outputs with official competition validator
 python3 code/src/validate_submission.py \
-    --matching output/test/matching_results.tsv \
-    --candidate output/test/candidate_pairs.tsv \
-    --test-dir 6ab10eb3b23ba_student_resource/student_resource/dataset/test
+    --matching output/matching_results.tsv \
+    --candidate output/candidate_pairs.tsv \
+    --test-dir dataset/test
 
 # 5. Create final submission archive
-zip -j submission.zip output/test/matching_results.tsv output/test/candidate_pairs.tsv
+zip -r unwanted_submission.zip output code Documentation_template.md
 ```

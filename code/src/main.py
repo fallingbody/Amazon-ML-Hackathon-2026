@@ -6,6 +6,7 @@ Usage:
 """
 import gc
 import os
+import shutil
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -185,6 +186,7 @@ def parse_args():
     parser.add_argument("--trees-per-chunk", type=int, default=100, help="Number of trees to add per chunk in multi-chunk training (default: 100)")
     parser.add_argument("--continue-training", action="store_true", help="Continue training from existing model checkpoint")
     parser.add_argument("--eval-only", action="store_true", help="Only run validation audit and confusion matrix evaluation on existing model and exit")
+    parser.add_argument("--output-dir", type=str, default=None, help="Target directory for output files (defaults to output/ or unwanted_submission/output/)")
     return parser.parse_args()
 
 def evaluate_and_report_validation(
@@ -299,7 +301,8 @@ def run_pipeline(
     val_size: int = 2000,
     trees_per_chunk: int = 100,
     continue_training: bool = False,
-    eval_only: bool = False
+    eval_only: bool = False,
+    output_dir: str = None
 ):
     if num_workers is None:
         num_workers = min(8, os.cpu_count() or 4)
@@ -362,7 +365,12 @@ def run_pipeline(
     os.makedirs(train_dir, exist_ok=True)
     os.makedirs(test_dir, exist_ok=True)
 
-    out_dir = test_dir if split == "test" else train_dir
+    if output_dir:
+        out_dir = output_dir
+        os.makedirs(out_dir, exist_ok=True)
+    else:
+        out_dir = test_dir if split == "test" else train_dir
+
     cand_out_path = os.path.join(out_dir, "candidate_pairs.tsv")
     match_out_path = os.path.join(out_dir, "matching_results.tsv")
 
@@ -486,7 +494,30 @@ def run_pipeline(
                     gc.collect()
 
         print(f"\n[5/5] Test inference complete! Outputs saved to {cand_out_path} and {match_out_path}.", flush=True)
-        
+
+        # 1. Mirror outputs to standard output/ directory for validator compatibility
+        std_out = "output"
+        os.makedirs(std_out, exist_ok=True)
+        std_match = os.path.join(std_out, "matching_results.tsv")
+        std_cand = os.path.join(std_out, "candidate_pairs.tsv")
+        if os.path.abspath(match_out_path) != os.path.abspath(std_match):
+            try:
+                shutil.copy2(match_out_path, std_match)
+                shutil.copy2(cand_out_path, std_cand)
+                print(f"  Mirrored submission outputs to {std_match} and {std_cand}", flush=True)
+            except Exception:
+                pass
+
+        # 2. Mirror outputs to unwanted_submission/output/ if directory exists
+        unwanted_out = os.path.join("unwanted_submission", "output")
+        if os.path.exists(unwanted_out) and os.path.abspath(match_out_path) != os.path.abspath(os.path.join(unwanted_out, "matching_results.tsv")):
+            try:
+                shutil.copy2(match_out_path, os.path.join(unwanted_out, "matching_results.tsv"))
+                shutil.copy2(cand_out_path, os.path.join(unwanted_out, "candidate_pairs.tsv"))
+                print(f"  Mirrored submission outputs directly into {unwanted_out}/", flush=True)
+            except Exception:
+                pass
+
         # Free memory before running validator subprocess to prevent OOM
         del df_s1, s1_records
         if "chunks" in locals():
@@ -752,5 +783,6 @@ if __name__ == "__main__":
         val_size=args.val_size,
         trees_per_chunk=args.trees_per_chunk,
         continue_training=args.continue_training,
-        eval_only=args.eval_only
+        eval_only=args.eval_only,
+        output_dir=args.output_dir
     )

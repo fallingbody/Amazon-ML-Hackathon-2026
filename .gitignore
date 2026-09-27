@@ -24,6 +24,8 @@ env/
 
 # Generated Output & Model Weights
 output/
+unwanted_submission/
+*.zip
 *.pkl
 
 # System & OS Files
