@@ -219,88 +219,137 @@ class CandidateIndexer:
         """Returns pre-cached generic tokens appearing in > 25,000 records."""
         return GENERIC_TOKENS
 
-    def find_candidates_for_record(self, name: str, address: str, max_candidates: int = 50, country: str = None) -> Set[str]:
+    def find_candidates_for_record(self, name: str, address: str, max_candidates: int = 150, country: str = None) -> Set[str]:
         """
-        Extracts informative search tokens and retrieves candidates with balanced S2/S3 queries
-        and in-memory lexical re-ranking.
+        High-Recall Balanced Multi-Pass Candidate Blocker:
+        1. 2-term name conjunctions (INTERSECT) to retrieve multi-word entities instantly.
+        2. Balanced S2 / S3 queries for distinct name and address tokens.
+        3. House number and postal code matching for geographic clustering.
+        4. Multi-signal ranking (name overlap, conjunction bonus, prefix matching, house match).
         """
         clean_n = clean_text(name)
         clean_a = clean_text(address)
         if not clean_n and not clean_a:
             return set()
 
-        freq_tokens = self.get_frequent_tokens()
-        name_words = [t for t in clean_n.split() if len(t) >= 3 and t not in freq_tokens and t not in STOP_WORDS]
-        addr_words = [t for t in clean_a.split() if len(t) >= 3 and t not in freq_tokens and t not in STOP_WORDS]
+        s1_name_words = [t for t in clean_n.split() if len(t) >= 3]
+        s1_addr_words = [t for t in clean_a.split() if len(t) >= 3 and t not in STOP_WORDS]
+        s1_first_word = s1_name_words[0] if s1_name_words else ""
+        s1_country = str(country).strip().lower() if country else ""
+        s1_house = extract_house_numbers(address)
 
-        # Prioritize longest / brand tokens first (longer words are exponentially more unique)
-        name_words.sort(key=len, reverse=True)
-        addr_words.sort(key=len, reverse=True)
-
-        # Query top 3 distinctive name tokens and top 2 distinctive address tokens
-        query_tokens = name_words[:3] + addr_words[:2]
-        if not query_tokens:
-            all_fallback = [t for t in (clean_n + " " + clean_a).split() if len(t) >= 3]
-            query_tokens = sorted(all_fallback, key=len, reverse=True)[:3]
-
-        if not query_tokens:
+        if not s1_name_words and not s1_addr_words:
             return set()
 
         conn = self.get_connection()
         cursor = conn.cursor()
-
-        # Balanced S2 / S3 Candidate Retrieval:
-        # S2 rows have lowest rowids (queried forward LIMIT 125)
-        # S3 rows have highest rowids (queried in reverse ORDER BY rowid DESC LIMIT 125)
         candidate_pool = set()
-        for token in query_tokens:
-            # Source 2
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 125", (token,))
+
+        # Pass 1: 2-Term Name Conjunction (catches multi-word matches across all 10M records)
+        if len(s1_name_words) >= 2:
+            for i in range(min(2, len(s1_name_words))):
+                for j in range(i + 1, min(3, len(s1_name_words))):
+                    try:
+                        cursor.execute(f"""
+                            SELECT {self._id_col} FROM token_index WHERE token = ?
+                            INTERSECT
+                            SELECT {self._id_col} FROM token_index WHERE token = ?
+                            LIMIT 300
+                        """, (s1_name_words[i], s1_name_words[j]))
+                        for (rec_id,) in cursor.fetchall():
+                            candidate_pool.add(rec_id)
+                    except Exception:
+                        pass
+
+        # Pass 2: Name token INTERSECT House number (catches entities at exact same street address)
+        if s1_name_words and s1_house:
+            for h in s1_house:
+                if len(h) >= 2:
+                    try:
+                        cursor.execute(f"""
+                            SELECT {self._id_col} FROM token_index WHERE token = ?
+                            INTERSECT
+                            SELECT {self._id_col} FROM token_index WHERE token = ?
+                            LIMIT 200
+                        """, (s1_name_words[0], h))
+                        for (rec_id,) in cursor.fetchall():
+                            candidate_pool.add(rec_id)
+                    except Exception:
+                        pass
+
+        # Pass 3: Name token INTERSECT distinctive address word
+        if s1_name_words and s1_addr_words:
+            best_addr = sorted(s1_addr_words, key=len, reverse=True)[0]
+            try:
+                cursor.execute(f"""
+                    SELECT {self._id_col} FROM token_index WHERE token = ?
+                    INTERSECT
+                    SELECT {self._id_col} FROM token_index WHERE token = ?
+                    LIMIT 200
+                """, (s1_name_words[0], best_addr))
+                for (rec_id,) in cursor.fetchall():
+                    candidate_pool.add(rec_id)
+            except Exception:
+                pass
+
+        # Pass 4: Ultra-fast balanced single-token queries (S2 forward, S3 reverse)
+        for token in sorted(s1_name_words, key=len, reverse=True)[:3]:
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 350", (token,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
-            # Source 3
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 125", (token,))
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 350", (token,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
 
-        # Building / House number auxiliary query (captures businesses with name variations at same building)
-        houses = extract_house_numbers(address)
-        for h in houses:
-            if len(h) >= 3:
-                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 60", (h,))
+        # Pass 5: Distinct address tokens (balanced S2/S3)
+        for token in sorted(s1_addr_words, key=len, reverse=True)[:2]:
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 200", (token,))
+            for (rec_id,) in cursor.fetchall():
+                candidate_pool.add(rec_id)
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 200", (token,))
+            for (rec_id,) in cursor.fetchall():
+                candidate_pool.add(rec_id)
+
+        # Pass 6: Building / House numbers
+        for h in s1_house:
+            if len(h) >= 2:
+                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 250", (h,))
+                for (rec_id,) in cursor.fetchall():
+                    candidate_pool.add(rec_id)
+                cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 250", (h,))
                 for (rec_id,) in cursor.fetchall():
                     candidate_pool.add(rec_id)
 
-        # Postal code auxiliary query (captures businesses with name typos but identical zip)
+        # Pass 7: Postal code
         postal = extract_postal_code(clean_a, country)
         if postal and len(postal) >= 5:
-            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 60", (postal,))
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 250", (postal,))
+            for (rec_id,) in cursor.fetchall():
+                candidate_pool.add(rec_id)
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? ORDER BY rowid DESC LIMIT 250", (postal,))
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
 
         if not candidate_pool:
             return set()
 
-        # Fast lexical re-ranking using compact tuple records dict (if present) OR direct SQLite PK lookup
-        s1_name_words = set(clean_n.split())
-        s1_addr_words = set(clean_a.split())
-        s1_first_word = clean_n.split()[0] if clean_n else ""
-        s1_country = str(country).strip().lower() if country else ""
-        s1_house = extract_house_numbers(address)
-
+        # Re-ranking candidates using multi-signal scoring
+        cand_list = list(candidate_pool)
         cand_attributes = {}
         if self._records_dict:
             for cid in candidate_pool:
                 if cid in self._records_dict:
                     cand_attributes[cid] = self._records_dict[cid]
         else:
-            cand_list = list(candidate_pool)
             for i in range(0, len(cand_list), 900):
                 chunk_cands = cand_list[i:i + 900]
                 placeholders = ",".join("?" for _ in chunk_cands)
                 cursor.execute(f"SELECT record_id, name, address, country, dataset FROM records WHERE record_id IN ({placeholders})", chunk_cands)
                 for r in cursor.fetchall():
                     cand_attributes[r[0]] = (r[1] or "", r[2] or "", r[3] or "", r[4] or "")
+
+        s1_n_set = set(s1_name_words)
+        s1_a_set = set(s1_addr_words)
 
         scored_candidates = []
         for cid, rec in cand_attributes.items():
@@ -312,20 +361,29 @@ class CandidateIndexer:
             c_name_words = set(c_name_raw)
             c_addr_words = set(rec[1].lower().split())
 
-            name_overlap = len(s1_name_words & c_name_words)
-            addr_overlap = len(s1_addr_words & c_addr_words)
+            name_overlap = len(s1_n_set & c_name_words)
+            addr_overlap = len(s1_a_set & c_addr_words)
             first_word_bonus = 3 if (s1_first_word and c_name_raw and s1_first_word == c_name_raw[0]) else 0
+
+            # Substring / prefix bonus
+            prefix_bonus = 0
+            if s1_first_word and c_name_raw:
+                c_first = c_name_raw[0]
+                if len(s1_first_word) >= 4 and len(c_first) >= 4 and s1_first_word[:4] == c_first[:4]:
+                    prefix_bonus = 2
 
             house_bonus = 0
             if s1_house:
                 c_house = extract_house_numbers(rec[1])
                 if c_house:
                     if s1_house == c_house:
-                        house_bonus = 2
+                        house_bonus = 3
                     elif not (s1_house & c_house):
-                        house_bonus = -2
+                        house_bonus = -1
 
-            score = name_overlap * 4 + addr_overlap + first_word_bonus + house_bonus
+            conj_bonus = 5 if name_overlap >= 2 else 0
+
+            score = name_overlap * 4 + conj_bonus + addr_overlap * 2 + first_word_bonus + prefix_bonus + house_bonus
             scored_candidates.append((cid, score))
 
         if scored_candidates:

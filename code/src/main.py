@@ -184,6 +184,7 @@ def parse_args():
     parser.add_argument("--val-size", type=int, default=2000, help="Number of Source 1 entities for fixed holdout validation (default: 2,000)")
     parser.add_argument("--trees-per-chunk", type=int, default=100, help="Number of trees to add per chunk in multi-chunk training (default: 100)")
     parser.add_argument("--continue-training", action="store_true", help="Continue training from existing model checkpoint")
+    parser.add_argument("--eval-only", action="store_true", help="Only run validation audit and confusion matrix evaluation on existing model and exit")
     return parser.parse_args()
 
 def evaluate_and_report_validation(
@@ -294,7 +295,8 @@ def run_pipeline(
     chunk_offset: int = 0,
     val_size: int = 2000,
     trees_per_chunk: int = 100,
-    continue_training: bool = False
+    continue_training: bool = False,
+    eval_only: bool = False
 ):
     if num_workers is None:
         num_workers = min(8, os.cpu_count() or 4)
@@ -567,7 +569,30 @@ def run_pipeline(
         del df_val_raw, val_records, val_chunks, val_relevant_gt, val_features_list, val_labels_list
         gc.collect()
 
-    # 2. Check for Continuation Model
+    # 2. Standalone Evaluation Mode or Continuation
+    if eval_only:
+        print(f"\n[3/5] Standalone Validation Audit & Benchmark Evaluation Mode (--eval-only)...", flush=True)
+        if not os.path.exists(model_save_path):
+            alt_path = "output/lgb_model.pkl"
+            if os.path.exists(alt_path):
+                model_save_path = alt_path
+            else:
+                raise FileNotFoundError(f"Model checkpoint not found at {model_save_path} or {alt_path}!")
+        print(f"Loading trained ensemble model from {model_save_path}...", flush=True)
+        model = EntityResolutionModel.load(model_save_path)
+        metrics = evaluate_and_report_validation(
+            model=model, X_val=X_val, y_val=y_val,
+            val_entities_list=val_entities_list, val_pairs_list=val_pairs_list,
+            gt_map=gt_map, max_candidates=max_candidates,
+            title=f"EVALUATION AUDIT (Top-{max_candidates} Candidates | {len(val_entities_list):,} Entities)"
+        )
+        val_metrics_path = os.path.join(train_dir, "val_metrics.pkl")
+        with open(val_metrics_path, "wb") as f:
+            pickle.dump(metrics, f)
+        print(f"Saved validation audit metrics to {val_metrics_path} for Cell 5b visualization.\n", flush=True)
+        return
+
+    # 2b. Check for Continuation Model
     model = None
     if continue_training or (chunk_offset > 0 and os.path.exists(model_save_path)):
         if os.path.exists(model_save_path):
@@ -717,5 +742,6 @@ if __name__ == "__main__":
         chunk_offset=args.chunk_offset,
         val_size=args.val_size,
         trees_per_chunk=args.trees_per_chunk,
-        continue_training=args.continue_training
+        continue_training=args.continue_training,
+        eval_only=args.eval_only
     )
