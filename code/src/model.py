@@ -1,14 +1,26 @@
 """
 Module: model.py
-LightGBM Classifier model training, evaluation, and Macro F0.5 score threshold optimization.
-Supports GPU acceleration.
+LightGBM + CatBoost + XGBoost Multi-Model Stacking & Macro F0.5 Threshold Optimization.
+Optimized for Competition Leaderboard Maximization.
 """
 import os
 import pickle
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any, List
+
+try:
+    import catboost as cb
+    HAS_CATBOOST = True
+except ImportError:
+    HAS_CATBOOST = False
+
+try:
+    import xgboost as xgb
+    HAS_XGBOOST = True
+except ImportError:
+    HAS_XGBOOST = False
 
 def calculate_f_beta(precision: float, recall: float, beta: float = 0.5) -> float:
     """Calculates F-beta score given precision, recall, and beta (default 0.5)."""
@@ -18,7 +30,7 @@ def calculate_f_beta(precision: float, recall: float, beta: float = 0.5) -> floa
     return (1 + beta_sq) * (precision * recall) / (beta_sq * precision + recall)
 
 class EntityResolutionModel:
-    """LightGBM model wrapper for Business Entity Resolution pair matching."""
+    """Multi-Model Gradient Boosting Ensemble for Business Entity Resolution pair matching."""
     
     def __init__(self, n_estimators: int = 300, learning_rate: float = 0.05, use_gpu: bool = False):
         self.params = {
@@ -35,18 +47,21 @@ class EntityResolutionModel:
             "n_jobs": -1
         }
         
-        # Configure device (CPU by default with all cores; GPU if requested)
         if use_gpu:
             self.params["device"] = "gpu"
         else:
             self.params["device"] = "cpu"
 
         self.clf = lgb.LGBMClassifier(**self.params)
+        self.cb_clf = None
+        self.xgb_clf = None
         self.optimal_threshold = 0.5
+        self.val_metrics = {}
 
     def train(self, X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame = None, y_val: pd.Series = None, val_groups: np.ndarray = None):
-        """Trains the LightGBM classifier on pair features with automatic fallback to CPU if GPU/OpenCL is unavailable."""
-        def _fit_model():
+        """Trains LightGBM (and optional CatBoost & XGBoost) on pair features with early stopping."""
+        # 1. Train LightGBM
+        def _fit_lgb():
             if X_val is not None and y_val is not None:
                 self.clf.fit(
                     X_train, y_train,
@@ -57,25 +72,95 @@ class EntityResolutionModel:
                 self.clf.fit(X_train, y_train)
 
         try:
-            _fit_model()
+            _fit_lgb()
         except lgb.basic.LightGBMError as e:
             if "OpenCL" in str(e) or "GPU" in str(e) or "gpu" in str(e):
-                print("\n[Notice] No OpenCL/GPU device detected for LightGBM. Automatically falling back to multi-core CPU...", flush=True)
+                print("\n[Notice] Falling back LightGBM to CPU...", flush=True)
                 self.params["device"] = "cpu"
                 self.clf = lgb.LGBMClassifier(**self.params)
-                _fit_model()
+                _fit_lgb()
             else:
                 raise e
 
+        # 2. Train CatBoost (if available)
+        if HAS_CATBOOST:
+            try:
+                print("Training CatBoost Classifier for Multi-Model Stacking...", flush=True)
+                self.cb_clf = cb.CatBoostClassifier(
+                    iterations=300,
+                    learning_rate=0.06,
+                    depth=6,
+                    loss_function="Logloss",
+                    eval_metric="Logloss",
+                    random_seed=42,
+                    verbose=0,
+                    thread_count=1
+                )
+                if X_val is not None and y_val is not None:
+                    self.cb_clf.fit(X_train, y_train, eval_set=(X_val, y_val), early_stopping_rounds=30, verbose=False)
+                else:
+                    self.cb_clf.fit(X_train, y_train, verbose=False)
+                print("CatBoost trained successfully.", flush=True)
+            except Exception as e:
+                print(f"[Notice] CatBoost training skipped ({e})", flush=True)
+                self.cb_clf = None
+
+        # 3. Train XGBoost (if available)
+        if HAS_XGBOOST:
+            try:
+                print("Training XGBoost Classifier for Multi-Model Stacking...", flush=True)
+                self.xgb_clf = xgb.XGBClassifier(
+                    n_estimators=300,
+                    learning_rate=0.06,
+                    max_depth=6,
+                    eval_metric="logloss",
+                    n_jobs=1,
+                    random_state=42
+                )
+                if X_val is not None and y_val is not None:
+                    self.xgb_clf.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+                else:
+                    self.xgb_clf.fit(X_train, y_train, verbose=False)
+                print("XGBoost trained successfully.", flush=True)
+            except Exception as e:
+                print(f"[Notice] XGBoost training skipped ({e})", flush=True)
+                self.xgb_clf = None
+
+        # 4. Tune Macro F0.5 Threshold on Ensembled Validation Probabilities
         if X_val is not None and y_val is not None:
-            val_probs = self.clf.predict_proba(X_val)[:, 1]
+            val_probs = self.predict_proba(X_val)
             self.optimal_threshold = self.optimize_f05_threshold(y_val, val_probs, groups=val_groups)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Returns match probabilities for given feature set."""
-        if hasattr(self.clf, "booster_"):
-            return self.clf.booster_.predict(X, num_threads=1)
-        return self.clf.predict_proba(X)[:, 1]
+        """Returns ensemble blend of match probabilities across available models."""
+        preds = []
+        weights = []
+
+        # LightGBM
+        if self.clf is not None:
+            if hasattr(self.clf, "booster_"):
+                p_lgb = self.clf.booster_.predict(X, num_threads=1)
+            else:
+                p_lgb = self.clf.predict_proba(X)[:, 1]
+            preds.append(p_lgb)
+            weights.append(0.50 if (self.cb_clf or self.xgb_clf) else 1.0)
+
+        # CatBoost
+        if self.cb_clf is not None:
+            p_cb = self.cb_clf.predict_proba(X)[:, 1]
+            preds.append(p_cb)
+            weights.append(0.30)
+
+        # XGBoost
+        if self.xgb_clf is not None:
+            p_xgb = self.xgb_clf.predict_proba(X)[:, 1]
+            preds.append(p_xgb)
+            weights.append(0.20)
+
+        total_w = sum(weights)
+        norm_w = [w / total_w for w in weights]
+        blend = sum(p * w for p, w in zip(preds, norm_w))
+        return blend
 
     def predict(self, X: pd.DataFrame, threshold: float = None) -> np.ndarray:
         """Returns binary match predictions (1 or 0) using optimal threshold."""
@@ -89,17 +174,14 @@ class EntityResolutionModel:
         best_f05 = 0.0
 
         if groups is None:
-            # Fallback to Global (Micro) F0.5 if no groups provided
             for thresh in np.linspace(0.2, 0.85, 131):
                 preds = (probs >= thresh).astype(int)
                 tp = np.sum((preds == 1) & (y_true == 1))
                 fp = np.sum((preds == 1) & (y_true == 0))
                 fn = np.sum((preds == 0) & (y_true == 1))
-                
                 precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
                 recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
                 f05 = calculate_f_beta(precision, recall, beta=0.5)
-                
                 if f05 > best_f05:
                     best_f05 = f05
                     best_thresh = thresh
@@ -111,37 +193,20 @@ class EntityResolutionModel:
 
         for thresh in np.linspace(0.2, 0.85, 131):
             preds = (probs >= thresh).astype(int)
-            
-            # Boolean masks
-            tp_mask = (preds == 1) & (y_true == 1)
-            fp_mask = (preds == 1) & (y_true == 0)
-            fn_mask = (preds == 0) & (y_true == 1)
-            
-            # Count TP, FP, FN per group
-            tp_g = np.bincount(group_idx, weights=tp_mask, minlength=n_groups)
-            fp_g = np.bincount(group_idx, weights=fp_mask, minlength=n_groups)
-            fn_g = np.bincount(group_idx, weights=fn_mask, minlength=n_groups)
-            
+            tp_g = np.bincount(group_idx, weights=(preds == 1) & (y_true == 1), minlength=n_groups)
+            fp_g = np.bincount(group_idx, weights=(preds == 1) & (y_true == 0), minlength=n_groups)
+            fn_g = np.bincount(group_idx, weights=(preds == 0) & (y_true == 1), minlength=n_groups)
+
             p_den = tp_g + fp_g
             r_den = tp_g + fn_g
-            
-            # Precision and Recall per group (safe division)
-            precision_g = np.divide(tp_g, p_den, out=np.zeros_like(tp_g, dtype=float), where=p_den!=0)
-            recall_g = np.divide(tp_g, r_den, out=np.zeros_like(tp_g, dtype=float), where=r_den!=0)
-            
-            # F0.5 per group (safe division)
-            f_den = 0.25 * precision_g + recall_g
-            f05_g = np.divide(1.25 * precision_g * recall_g, f_den, out=np.zeros_like(precision_g), where=f_den!=0)
-            
-            # Official Competition Rule for Singletons:
-            # If an entity has 0 true matches (tp_g == 0 and fn_g == 0),
-            # and model correctly predicted 0 matches (fp_g == 0), it receives 1.0!
-            singleton_perfect = (tp_g == 0) & (fp_g == 0) & (fn_g == 0)
-            f05_g[singleton_perfect] = 1.0
-            
-            # Macro Average across all entities
+            prec_g = np.divide(tp_g, p_den, out=np.zeros_like(tp_g, dtype=float), where=p_den != 0)
+            rec_g = np.divide(tp_g, r_den, out=np.zeros_like(tp_g, dtype=float), where=r_den != 0)
+
+            f_den = 0.25 * prec_g + rec_g
+            f05_g = np.divide(1.25 * prec_g * rec_g, f_den, out=np.zeros_like(prec_g), where=f_den != 0)
+            f05_g[(tp_g == 0) & (fp_g == 0) & (fn_g == 0)] = 1.0
             macro_f05 = np.mean(f05_g)
-            
+
             if macro_f05 > best_f05:
                 best_f05 = macro_f05
                 best_thresh = thresh
@@ -149,12 +214,14 @@ class EntityResolutionModel:
         return float(best_thresh)
 
     def save(self, filepath: str):
-        """Saves trained model, threshold, and validation metrics to disk."""
+        """Saves trained models, threshold, and validation metrics to disk."""
         dirname = os.path.dirname(filepath)
         if dirname:
             os.makedirs(dirname, exist_ok=True)
         save_dict = {
             "clf": self.clf,
+            "cb_clf": getattr(self, "cb_clf", None),
+            "xgb_clf": getattr(self, "xgb_clf", None),
             "optimal_threshold": self.optimal_threshold,
             "val_metrics": getattr(self, "val_metrics", {})
         }
@@ -164,12 +231,19 @@ class EntityResolutionModel:
 
     @classmethod
     def load(cls, filepath: str):
-        """Loads trained model, threshold, and metrics from disk."""
+        """Loads trained models, threshold, and metrics from disk."""
         with open(filepath, "rb") as f:
             data = pickle.load(f)
         model = cls()
-        model.clf = data["clf"]
-        model.optimal_threshold = data["optimal_threshold"]
+        model.clf = data.get("clf")
+        model.cb_clf = data.get("cb_clf")
+        model.xgb_clf = data.get("xgb_clf")
+        model.optimal_threshold = data.get("optimal_threshold", 0.5)
         model.val_metrics = data.get("val_metrics", {})
-        print(f"Loaded trained model from {filepath} (optimal_threshold={model.optimal_threshold:.3f})", flush=True)
+        models_loaded = ["LightGBM"]
+        if model.cb_clf is not None:
+            models_loaded.append("CatBoost")
+        if model.xgb_clf is not None:
+            models_loaded.append("XGBoost")
+        print(f"Loaded trained models {models_loaded} from {filepath} (optimal_threshold={model.optimal_threshold:.3f})", flush=True)
         return model

@@ -126,14 +126,14 @@ def find_db_path(split: str = "train", explicit_path: str = None) -> str:
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Business Entity Resolution Pipeline")
     parser.add_argument("--sample-size", type=int, default=50000, help="Number of Source 1 records to process (default 50,000)")
-    parser.add_argument("--max-candidates", type=int, default=30, help="Max candidates per entity from index.db (default 30)")
+    parser.add_argument("--max-candidates", type=int, default=40, help="Max candidates per entity from index.db (default 40)")
     parser.add_argument("--split", type=str, default="train", choices=["train", "test"], help="Dataset split to run on (train or test)")
     parser.add_argument("--no-cache", action="store_true", help="Disable caching of extracted features")
     parser.add_argument("--db-path", type=str, default=None, help="Explicit path to SQLite index.db (optional)")
     parser.add_argument("--num-workers", type=int, default=min(8, os.cpu_count() or 4), help="Number of parallel worker processes for test streaming (default: min(8, CPU count))")
     return parser.parse_args()
 
-def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str = "train", no_cache: bool = False, db_path_arg: str = None, num_workers: int = None):
+def run_pipeline(sample_size: int = 50000, max_candidates: int = 40, split: str = "train", no_cache: bool = False, db_path_arg: str = None, num_workers: int = None):
     if num_workers is None:
         num_workers = min(8, os.cpu_count() or 4)
     dataset_base = find_dataset_base()
@@ -334,10 +334,7 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
     # ======================================================================
     # TRAINING PIPELINE (split == 'train')
     # ======================================================================
-    cache_path = os.path.join(train_dir, f"cache_features_{split}_{len(df_s1)}_{max_candidates}.pkl")
-    legacy_cache_path = os.path.join("output", f"cache_features_{split}_{len(df_s1)}_{max_candidates}.pkl")
-    if not os.path.exists(cache_path) and os.path.exists(legacy_cache_path):
-        cache_path = legacy_cache_path
+    cache_path = os.path.join(train_dir, f"cache_features_{split}_{len(df_s1)}_{max_candidates}_v2.pkl")
     
     all_candidate_pairs = []
     candidates_map = {}
@@ -443,9 +440,9 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
     X_df = pd.DataFrame(features_list)
     y_arr = np.array(labels_list)
 
-    model_save_path = "output/lgb_model.pkl"
+    model_save_path = os.path.join(train_dir, "lgb_model.pkl")
     if split == "train":
-        print("\n[4/5] Training LightGBM Classifier & Tuning Macro F0.5 Threshold...", flush=True)
+        print("\n[4/5] Training Multi-Model Ensemble (LightGBM + CatBoost + XGBoost) & Tuning Macro F0.5...", flush=True)
         model = EntityResolutionModel()
         
         # Train/Val split if ground truth matches exist

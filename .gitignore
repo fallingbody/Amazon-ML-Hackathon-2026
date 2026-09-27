@@ -36,3 +36,4 @@ Thumbs.db
 .vscode/
 .idea/
 .gemini/
+catboost_info/

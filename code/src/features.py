@@ -6,7 +6,10 @@ High-speed vectorized string similarity metrics.
 """
 import re
 from typing import Dict, Any, Set
-from .preprocessing import clean_text, extract_house_numbers
+from .preprocessing import (
+    clean_text, extract_house_numbers, extract_postal_code,
+    extract_domain_category, check_acronym_match, jaro_winkler
+)
 
 def jaccard_similarity(set1: Set, set2: Set) -> float:
     """Computes Jaccard similarity between two sets."""
@@ -63,7 +66,9 @@ def precompute_s1_features(s1_rec: Dict[str, Any]) -> Dict[str, Any]:
         "tokens_addr1": set(words_addr1),
         "ngram_addr1": char_ngrams(addr1, n=3),
         "house1": extract_house_numbers(s1_rec.get("address", "")),
-        "c1": str(s1_rec.get("country", "")).strip().lower()
+        "c1": str(s1_rec.get("country", "")).strip().lower(),
+        "postal1": extract_postal_code(s1_rec.get("address", ""), str(s1_rec.get("country", ""))),
+        "domain1": extract_domain_category(name1, addr1)
     }
 
 def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_precomputed: Dict[str, Any] = None) -> Dict[str, float]:
@@ -161,6 +166,31 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
     # 5. Dataset Source
     dataset = str(cand_rec.get("dataset", "")).strip().lower()
     is_s2 = 1.0 if "source2" in dataset or "s2" in dataset else 0.0
+
+    # 6. Sprint 1 High-Signal Features (Precision & Recall Boosters)
+    name_jaro = jaro_winkler(name1, name2)
+    addr_jaro = jaro_winkler(addr1, addr2)
+    acronym_match = check_acronym_match(name1, name2)
+
+    # Postal / PIN Code Match & Conflict
+    postal1 = s1_precomputed.get("postal1", "") if s1_precomputed else extract_postal_code(s1_rec.get("address", ""), c1)
+    postal2 = extract_postal_code(cand_rec.get("address", ""), c2)
+    if postal1 and postal2:
+        postal_match = 1.0 if postal1 == postal2 else 0.0
+        postal_conflict = 1.0 if postal1 != postal2 and (not c1 or not c2 or c1 == c2) else 0.0
+    else:
+        postal_match = 0.0
+        postal_conflict = 0.0
+
+    # Business Domain Category Match & Conflict (e.g. Hospital vs Hotel)
+    domain1 = s1_precomputed.get("domain1", "") if s1_precomputed else extract_domain_category(name1, addr1)
+    domain2 = extract_domain_category(name2, addr2)
+    if domain1 and domain2:
+        domain_match = 1.0 if domain1 == domain2 else 0.0
+        domain_conflict = 1.0 if domain1 != domain2 else 0.0
+    else:
+        domain_match = 0.0
+        domain_conflict = 0.0
     
     return {
         "name_jaccard": name_jaccard,
@@ -175,6 +205,8 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
         "name_len_ratio": name_len_ratio,
         "first_word_match": first_word_match,
         "last_word_match": last_word_match,
+        "name_jaro": name_jaro,
+        "acronym_match": acronym_match,
         "addr_jaccard": addr_jaccard,
         "addr_char_jaccard": addr_char_jaccard,
         "addr_sort_ratio": addr_sort_ratio,
@@ -182,10 +214,15 @@ def compute_pair_features(s1_rec: Dict[str, Any], cand_rec: Dict[str, Any], s1_p
         "addr_s1_in_cand": addr_s1_in_cand,
         "addr_cand_in_s1": addr_cand_in_s1,
         "addr_exact": addr_exact,
+        "addr_jaro": addr_jaro,
         "both_match_score": both_match_score,
         "both_exact": both_exact,
         "house_num_match": house_num_match,
         "house_num_conflict": house_num_conflict,
+        "postal_match": postal_match,
+        "postal_conflict": postal_conflict,
+        "domain_match": domain_match,
+        "domain_conflict": domain_conflict,
         "country_match": country_match,
         "is_s2": is_s2
     }

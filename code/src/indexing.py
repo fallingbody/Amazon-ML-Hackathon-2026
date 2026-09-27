@@ -7,7 +7,7 @@ import os
 import sqlite3
 import pandas as pd
 from typing import List, Set, Dict, Any
-from .preprocessing import extract_tokens, clean_text, extract_house_numbers, STOP_WORDS
+from .preprocessing import extract_tokens, clean_text, extract_house_numbers, extract_postal_code, STOP_WORDS
 
 def resolve_db_path(db_path: str = None, split: str = "train") -> str:
     if db_path:
@@ -253,49 +253,62 @@ class CandidateIndexer:
             for (rec_id,) in cursor.fetchall():
                 candidate_pool.add(rec_id)
 
+        # Postal code auxiliary query (captures businesses with name typos but identical zip)
+        postal = extract_postal_code(clean_a, country)
+        if postal and len(postal) >= 5:
+            cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 40", (postal,))
+            for (rec_id,) in cursor.fetchall():
+                candidate_pool.add(rec_id)
+
         if not candidate_pool:
             return set()
 
-        # Fast in-memory lexical re-ranking using compact tuple records dict
+        # Fast lexical re-ranking using compact tuple records dict (if present) OR direct SQLite PK lookup
+        s1_name_words = set(clean_n.split())
+        s1_addr_words = set(clean_a.split())
+        s1_first_word = clean_n.split()[0] if clean_n else ""
+        s1_country = str(country).strip().lower() if country else ""
+        s1_house = extract_house_numbers(address)
+
+        cand_attributes = {}
         if self._records_dict:
-            s1_name_words = set(clean_n.split())
-            s1_addr_words = set(clean_a.split())
-            s1_first_word = clean_n.split()[0] if clean_n else ""
-            s1_country = str(country).strip().lower() if country else ""
-            s1_house = extract_house_numbers(address)
-
-            scored_candidates = []
             for cid in candidate_pool:
-                rec = self._records_dict.get(cid)
-                if not rec:
-                    continue
-                # rec is (name, address, country, dataset)
-                c_country = str(rec[2]).strip().lower()
-                # Open-set country filter: reject impossible cross-country pairs immediately
-                if s1_country and c_country and s1_country != c_country:
-                    continue
+                if cid in self._records_dict:
+                    cand_attributes[cid] = self._records_dict[cid]
+        else:
+            cand_list = list(candidate_pool)
+            placeholders = ",".join("?" for _ in cand_list)
+            cursor.execute(f"SELECT record_id, name, address, country, dataset FROM records WHERE record_id IN ({placeholders})", cand_list)
+            for r in cursor.fetchall():
+                cand_attributes[r[0]] = (r[1] or "", r[2] or "", r[3] or "", r[4] or "")
 
-                c_name_raw = rec[0].lower().split()
-                c_name_words = set(c_name_raw)
-                c_addr_words = set(rec[1].lower().split())
+        scored_candidates = []
+        for cid, rec in cand_attributes.items():
+            c_country = str(rec[2]).strip().lower()
+            if s1_country and c_country and s1_country != c_country:
+                continue
 
-                name_overlap = len(s1_name_words & c_name_words)
-                addr_overlap = len(s1_addr_words & c_addr_words)
-                first_word_bonus = 3 if (s1_first_word and c_name_raw and s1_first_word == c_name_raw[0]) else 0
+            c_name_raw = rec[0].lower().split()
+            c_name_words = set(c_name_raw)
+            c_addr_words = set(rec[1].lower().split())
 
-                # House number bonus or conflict penalty (only if s1 has house numbers)
-                house_bonus = 0
-                if s1_house:
-                    c_house = extract_house_numbers(rec[1])
-                    if c_house:
-                        if s1_house == c_house:
-                            house_bonus = 2
-                        elif not (s1_house & c_house):
-                            house_bonus = -2
+            name_overlap = len(s1_name_words & c_name_words)
+            addr_overlap = len(s1_addr_words & c_addr_words)
+            first_word_bonus = 3 if (s1_first_word and c_name_raw and s1_first_word == c_name_raw[0]) else 0
 
-                score = name_overlap * 4 + addr_overlap + first_word_bonus + house_bonus
-                scored_candidates.append((cid, score))
+            house_bonus = 0
+            if s1_house:
+                c_house = extract_house_numbers(rec[1])
+                if c_house:
+                    if s1_house == c_house:
+                        house_bonus = 2
+                    elif not (s1_house & c_house):
+                        house_bonus = -2
 
+            score = name_overlap * 4 + addr_overlap + first_word_bonus + house_bonus
+            scored_candidates.append((cid, score))
+
+        if scored_candidates:
             scored_candidates.sort(key=lambda x: x[1], reverse=True)
             return {cid for cid, _ in scored_candidates[:max_candidates]}
 
