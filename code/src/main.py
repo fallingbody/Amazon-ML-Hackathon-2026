@@ -44,12 +44,11 @@ except (ImportError, ValueError):
 _WORKER_INDEXER = None
 _WORKER_MODEL = None
 _WORKER_MAX_CANDS = 30
-_GLOBAL_RECORDS_DICT = None
 
 def _init_test_worker(db_path: str, model_path: str, dataset_base: str, max_candidates: int):
-    global _WORKER_INDEXER, _WORKER_MODEL, _WORKER_MAX_CANDS, _GLOBAL_RECORDS_DICT
+    global _WORKER_INDEXER, _WORKER_MODEL, _WORKER_MAX_CANDS
     _WORKER_INDEXER = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split="test", is_worker=True)
-    _WORKER_INDEXER._records_dict = _GLOBAL_RECORDS_DICT
+    _WORKER_INDEXER._records_dict = None  # Pure Zero-RAM disk mode via SQLite Primary Key
     _WORKER_INDEXER.get_frequent_tokens()
     _WORKER_MODEL = EntityResolutionModel.load(model_path)
     _WORKER_MAX_CANDS = max_candidates
@@ -135,7 +134,6 @@ def parse_args():
     return parser.parse_args()
 
 def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str = "train", no_cache: bool = False, db_path_arg: str = None, num_workers: int = None):
-    global _GLOBAL_RECORDS_DICT
     if num_workers is None:
         num_workers = min(8, os.cpu_count() or 4)
     dataset_base = find_dataset_base()
@@ -219,7 +217,6 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
 
         print(f"\n[3/5] Initializing Zero-RAM SQLite Disk Index (TEST set)...", flush=True)
         indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split="test")
-        indexer.load_records_dict()
         indexer.get_frequent_tokens()
 
         print(f"\n[4/5] Streaming predictions directly to disk in batches (RAM < 400 MB)...", flush=True)
@@ -232,12 +229,12 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
             f_match.write("source1_entity_id\tmatched_entity_ids\n")
 
             if num_workers > 1:
-                _GLOBAL_RECORDS_DICT = indexer._records_dict
                 indexer.close()  # CRITICAL: Close SQLite connection in parent before fork to avoid deadlock in workers
 
-                chunk_size = 250
-                chunks = [s1_records[i:i + chunk_size] for i in range(0, total_s1, chunk_size)]
-                print(f"Executing with {num_workers} parallel workers across {len(chunks):,} chunks...", flush=True)
+                chunk_size = 500
+                chunks = (s1_records[i:i + chunk_size] for i in range(0, total_s1, chunk_size))
+                num_chunks = (total_s1 + chunk_size - 1) // chunk_size
+                print(f"Executing with {num_workers} parallel workers across {num_chunks:,} chunks (Pure Zero-RAM Mode)...", flush=True)
 
                 processed_count = 0
                 with mp.Pool(
@@ -328,7 +325,6 @@ def run_pipeline(sample_size: int = 50000, max_candidates: int = 30, split: str 
         del df_s1, s1_records
         if "chunks" in locals():
             del chunks
-        _GLOBAL_RECORDS_DICT = None
         gc.collect()
 
         print("\nValidating output submission files against official submission validator...", flush=True)
