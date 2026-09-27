@@ -717,6 +717,12 @@ def run_pipeline(
             model.save("output/lgb_model.pkl")
         except Exception:
             pass
+        try:
+            val_metrics_save_path = os.path.join(train_dir, "val_metrics.pkl")
+            with open(val_metrics_save_path, "wb") as f_vm:
+                pickle.dump(metrics, f_vm)
+        except Exception:
+            pass
 
         # Explicitly free memory per chunk
         del df_chunk, s1_records, chunks, s1_id_set, relevant_gt, candidates_map, all_candidate_pairs, features_list, labels_list, X_train, y_train

@@ -292,6 +292,23 @@ class CandidateIndexer:
             except Exception:
                 pass
 
+        # Pass 3b: 2-Term Distinct Address Conjunction (catches entities with blank/corrupted names in S2/S3)
+        if len(s1_addr_words) >= 2:
+            top_addr = sorted(s1_addr_words, key=len, reverse=True)[:3]
+            for i in range(min(2, len(top_addr))):
+                for j in range(i + 1, min(3, len(top_addr))):
+                    try:
+                        cursor.execute(f"""
+                            SELECT {self._id_col} FROM token_index WHERE token = ?
+                            INTERSECT
+                            SELECT {self._id_col} FROM token_index WHERE token = ?
+                            LIMIT 150
+                        """, (top_addr[i], top_addr[j]))
+                        for (rec_id,) in cursor.fetchall():
+                            candidate_pool.add(rec_id)
+                    except Exception:
+                        pass
+
         # Pass 4: Ultra-fast balanced single-token queries (S2 forward, S3 reverse)
         for token in sorted(s1_name_words, key=len, reverse=True)[:4]:
             cursor.execute(f"SELECT {self._id_col} FROM token_index WHERE token = ? LIMIT 450", (token,))
@@ -382,8 +399,9 @@ class CandidateIndexer:
                         house_bonus = -1
 
             conj_bonus = 5 if name_overlap >= 2 else 0
+            addr_conj_bonus = 4 if addr_overlap >= 2 else 0
 
-            score = name_overlap * 4 + conj_bonus + addr_overlap * 2 + first_word_bonus + prefix_bonus + house_bonus
+            score = name_overlap * 4 + conj_bonus + addr_overlap * 2 + addr_conj_bonus + first_word_bonus + prefix_bonus + house_bonus
             scored_candidates.append((cid, score))
 
         if scored_candidates:
