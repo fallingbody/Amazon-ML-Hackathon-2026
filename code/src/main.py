@@ -164,6 +164,7 @@ def find_db_path(split: str = "train", explicit_path: str = None) -> str:
         return explicit_path
     db_name = f"index_{split}.db" if split != "train" else "index.db"
     possible_paths = [
+        f"/dev/shm/{db_name}",
         db_name,
         os.path.join("dataset", db_name),
         os.path.join("..", db_name),
@@ -400,6 +401,24 @@ def run_pipeline(
             raise FileNotFoundError(f"Model file {model_load_path} not found! Please run '--split train' first.")
         model = EntityResolutionModel.load(model_load_path)
 
+        # High-Speed RAM-disk optimization: Check if index is or can be placed in /dev/shm
+        shm_candidate = f"/dev/shm/{os.path.basename(db_path)}"
+        if os.path.exists(shm_candidate):
+            db_path = shm_candidate
+            print(f"Using high-speed RAM-disk index: {db_path} (Zero EBS latency)", flush=True)
+        elif os.path.exists("/dev/shm") and os.path.exists(db_path):
+            try:
+                import shutil
+                shm_usage = shutil.disk_usage("/dev/shm")
+                db_size = os.path.getsize(db_path)
+                if shm_usage.free > db_size + (2 * 1024 * 1024 * 1024):
+                    print(f"Accelerating test inference: copying {db_path} to RAM-disk {shm_candidate}...", flush=True)
+                    shutil.copy2(db_path, shm_candidate)
+                    db_path = shm_candidate
+                    print(f"RAM-disk index active at {db_path} (Zero EBS latency)", flush=True)
+            except Exception:
+                pass
+
         print(f"\n[3/5] Initializing Zero-RAM SQLite Disk Index (TEST set)...", flush=True)
         indexer = CandidateIndexer(db_path=db_path, dataset_base=dataset_base, split="test")
         indexer.get_frequent_tokens()
@@ -416,7 +435,7 @@ def run_pipeline(
             if num_workers > 1:
                 indexer.close()  # CRITICAL: Close SQLite connection in parent before fork to avoid deadlock in workers
 
-                _test_batch_size = 500
+                _test_batch_size = 50
                 _test_chunks = (s1_records[i:i + _test_batch_size] for i in range(0, total_s1, _test_batch_size))
                 _test_num_chunks = (total_s1 + _test_batch_size - 1) // _test_batch_size
                 print(f"Executing with {num_workers} parallel workers across {_test_num_chunks:,} chunks (Pure Zero-RAM Mode)...", flush=True)
@@ -432,7 +451,7 @@ def run_pipeline(
                         f_match.writelines(match_lines)
                         processed_count += len(cand_lines)
 
-                        if processed_count % 1000 == 0 or processed_count == total_s1 or total_s1 <= 2000:
+                        if processed_count % 100 == 0 or processed_count == total_s1 or total_s1 <= 2000:
                             f_cand.flush()
                             f_match.flush()
                             elapsed = time.time() - start_time
